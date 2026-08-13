@@ -17,7 +17,11 @@ from torch.distributed.fsdp import (
     FullStateDictConfig,
     StateDictType,
 )
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.fsdp.wrap import (
+    _or_policy,
+    lambda_auto_wrap_policy,
+    transformer_auto_wrap_policy,
+)
 from safetensors.torch import load_file, save_file
 
 from modeling.bagel.modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
@@ -48,7 +52,7 @@ class FSDPConfig:
 def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
     if fsdp_config.sharding_strategy == 'HYBRID_SHARD':
         device_mesh = init_device_mesh(
-            "cuda", 
+            "cuda",
             mesh_shape=(fsdp_config.num_replicate, fsdp_config.num_shard),
             mesh_dim_names=("replicate", "shard")
         )
@@ -69,6 +73,61 @@ def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
                 PositionEmbedding,
             },
         ),
+        ignored_modules=ignored_modules,
+        mixed_precision=MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        ),
+        device_id=dist.get_rank() % torch.cuda.device_count(),
+        sharding_strategy=ShardingStrategy[fsdp_config.sharding_strategy],
+        backward_prefetch=BackwardPrefetch[fsdp_config.backward_prefetch],
+        cpu_offload=CPUOffload(offload_params=fsdp_config.cpu_offload),
+        device_mesh=device_mesh,
+    )
+
+# qinluozheng@SAIS: modified fsdp wrapper for achieving LoRA finetuning
+#                   special thanks to https://zhuanlan.zhihu.com/p/694288870
+def fsdp_with_lora_wrapper(original_model, fsdp_config, ignored_modules=[]):
+    if fsdp_config.sharding_strategy == 'HYBRID_SHARD':
+        device_mesh = init_device_mesh(
+            "cuda",
+            mesh_shape=(fsdp_config.num_replicate, fsdp_config.num_shard),
+            mesh_dim_names=("replicate", "shard")
+        )
+    else:
+        device_mesh = None
+
+    def lambda_policy_fn(module):
+        if (
+            len(list(module.named_children())) == 0
+            and getattr(module, "weight", None) is not None
+            and module.weight.requires_grad
+        ):
+            return True
+
+        return False
+
+    lambda_policy = functools.partial(lambda_auto_wrap_policy,
+            lambda_fn=lambda_policy_fn) # LoRA module wrapper
+    transformer_wrap_policy = functools.partial(transformer_auto_wrap_policy, # Base model wrapper
+            transformer_layer_cls={
+                Qwen2DecoderLayer,
+                Qwen2MoEDecoderLayer,
+                Qwen2MoTDecoderLayer,
+                SiglipEncoderLayer,
+                SiglipVisionTransformer,
+                MLPconnector,
+                TimestepEmbedder,
+                PositionEmbedding,
+            },
+        )
+    auto_wrap_policy = functools.partial(_or_policy,
+            policies=[lambda_policy, transformer_wrap_policy])
+
+    return FSDP(
+        original_model,
+        auto_wrap_policy=auto_wrap_policy,
         ignored_modules=ignored_modules,
         mixed_precision=MixedPrecision(
             param_dtype=torch.bfloat16,
