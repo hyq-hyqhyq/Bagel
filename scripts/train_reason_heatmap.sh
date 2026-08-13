@@ -36,6 +36,7 @@ torchrun \
   --freeze_vit False \
   --freeze_llm False \
   --freeze_und False \
+  --vit_cond_dropout_prob 0.0 \
   --use_flex True \
   --results_dir "$output_path" \
   --checkpoint_dir "$ckpt_path" \
@@ -45,4 +46,4 @@ torchrun \
   --lr 2e-5 \
   --expected_num_tokens 10240 \
   --max_num_tokens 11520 \
-  --max_num_tokens_per_sample 10240
+  --max_num_tokens_per_sample 11520
