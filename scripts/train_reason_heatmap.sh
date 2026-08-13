@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 # Replace the variables with your own.
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+
 num_nodes=${num_nodes:-1}
 node_rank=${node_rank:-0}
 nproc_per_node=${nproc_per_node:-8}
