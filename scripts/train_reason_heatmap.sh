@@ -12,6 +12,8 @@ model_path=${model_path:-models/BAGEL-7B-MoT}
 data_path=${BAGEL_REASON_HEATMAP_DATA_DIR:-/data/bagel/data/perspective_5k/canonical_5k_clean_4402}
 output_path=${output_path:-results/reason_heatmap}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
+wandb_name=${wandb_name:-reason_heatmap}
+wandb_runid=${wandb_runid:-0}
 
 export BAGEL_REASON_HEATMAP_DATA_DIR="$data_path"
 
@@ -40,6 +42,8 @@ torchrun \
   --use_flex True \
   --results_dir "$output_path" \
   --checkpoint_dir "$ckpt_path" \
+  --wandb_name "$wandb_name" \
+  --wandb_runid "$wandb_runid" \
   --num_workers 1 \
   --log_every 1 \
   --save_every 2000 \
