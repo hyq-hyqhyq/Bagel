@@ -130,6 +130,13 @@ def save_lora_checkpoint(
     dist.barrier()
 
 
+def sync_lora_gradients(lora_params):
+    for param in lora_params:
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad.div_(dist.get_world_size())
+
+
 @dataclass
 class ModelArguments:
     model_path: str = field(
@@ -601,8 +608,17 @@ def main():
         model.print_trainable_parameters()
     # ema_model = fsdp_ema_setup(ema_model, fsdp_config)
     lora_modules = [module for module in model.modules() if isinstance(module, LoraLayer)]
+    lora_adapter_modules = []
+    for lora_module in lora_modules:
+        lora_adapter_modules.extend(lora_module.lora_A.values())
+        lora_adapter_modules.extend(lora_module.lora_B.values())
+    for module in lora_adapter_modules:
+        module.to(device)
+    lora_params = [
+        param for module in lora_adapter_modules for param in module.parameters()
+    ]
     fsdp_model = fsdp_with_lora_wrapper(
-        model, fsdp_config, ignored_modules=lora_modules
+        model, fsdp_config, ignored_modules=lora_adapter_modules
     )
     apply_activation_checkpointing(
         fsdp_model,
@@ -747,6 +763,7 @@ def main():
 
         optimizer.zero_grad()
         loss.backward()
+        sync_lora_gradients(lora_params)
         total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
         optimizer.step()
         scheduler.step()
