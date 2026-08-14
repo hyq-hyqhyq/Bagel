@@ -133,7 +133,7 @@ def prepare_sample(row, data_dir, sample_type):
     return images, image_paths, prompt, reason, target
 
 
-def build_model(model_path, checkpoint_path, device):
+def build_model_architecture(model_path):
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
@@ -163,6 +163,12 @@ def build_model(model_path, checkpoint_path, device):
         model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(
             vit_config, meta=True
         )
+
+    return model, vae_model
+
+
+def build_model(model_path, checkpoint_path, device):
+    model, vae_model = build_model_architecture(model_path)
 
     model = load_checkpoint_and_dispatch(
         model,
@@ -211,8 +217,7 @@ def generate_heatmap(
     return outputs[-1]
 
 
-def main():
-    args = parse_args()
+def run_inference(args, model_loader, metadata_extra=None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for inference.")
 
@@ -228,7 +233,7 @@ def main():
         row, args.data_dir, args.sample_type
     )
 
-    model, vae_model = build_model(args.model_path, args.checkpoint_path, device)
+    model, vae_model = model_loader(args.model_path, args.checkpoint_path, device)
     tokenizer = Qwen2Tokenizer.from_pretrained(args.model_path)
     tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
     inferencer = InterleaveInferencer(
@@ -253,6 +258,10 @@ def main():
     target = inferencer.vae_transform.resize_transform(target)
 
     checkpoint_name = os.path.basename(os.path.normpath(args.checkpoint_path))
+    if checkpoint_name.endswith(".safetensors"):
+        checkpoint_name = os.path.basename(
+            os.path.dirname(os.path.normpath(args.checkpoint_path))
+        )
     sample_dir = os.path.join(
         args.output_dir,
         f"{checkpoint_name}_row{args.row_index}_{args.sample_type}",
@@ -264,7 +273,6 @@ def main():
         image.save(os.path.join(sample_dir, f"input_{index}.png"))
 
     metadata = {
-        "lora_variant": args.lora_variant,
         "checkpoint_path": args.checkpoint_path,
         "metadata_path": metadata_path,
         "row_index": args.row_index,
@@ -278,10 +286,21 @@ def main():
         "cfg_text_scale": args.cfg_text_scale,
         "cfg_img_scale": args.cfg_img_scale,
     }
+    if metadata_extra:
+        metadata.update(metadata_extra)
     with open(os.path.join(sample_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
     print(f"Saved inference outputs to {sample_dir}")
+
+
+def main():
+    args = parse_args()
+    run_inference(
+        args,
+        model_loader=build_model,
+        metadata_extra={"lora_variant": args.lora_variant},
+    )
 
 
 if __name__ == "__main__":
