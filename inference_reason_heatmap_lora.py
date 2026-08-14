@@ -48,6 +48,16 @@ LORA_VARIANTS = {
 }
 
 
+class DeviceImageTransform:
+    def __init__(self, transform, device):
+        self.transform = transform
+        self.device = device
+        self.resize_transform = transform.resize_transform
+
+    def __call__(self, *args, **kwargs):
+        return self.transform(*args, **kwargs).to(self.device)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run single-GPU teacher-forced inference with a reason heatmap LoRA."
@@ -240,21 +250,30 @@ def run_inference(args, model_loader, metadata_extra=None):
         model=model,
         vae_model=vae_model,
         tokenizer=tokenizer,
-        vae_transform=ImageTransform(1024, 512, 16),
-        vit_transform=ImageTransform(518, 224, 14),
+        vae_transform=DeviceImageTransform(
+            ImageTransform(1024, 512, 16), device
+        ),
+        vit_transform=DeviceImageTransform(
+            ImageTransform(518, 224, 14), device
+        ),
         new_token_ids=new_token_ids,
     )
 
-    prediction = generate_heatmap(
-        inferencer=inferencer,
-        images=images,
-        prompt=prompt,
-        reason=reason,
-        cfg_text_scale=args.cfg_text_scale,
-        cfg_img_scale=args.cfg_img_scale,
-        num_timesteps=args.num_timesteps,
-        timestep_shift=args.timestep_shift,
-    )
+    default_device = torch.get_default_device()
+    torch.set_default_device(device)
+    try:
+        prediction = generate_heatmap(
+            inferencer=inferencer,
+            images=images,
+            prompt=prompt,
+            reason=reason,
+            cfg_text_scale=args.cfg_text_scale,
+            cfg_img_scale=args.cfg_img_scale,
+            num_timesteps=args.num_timesteps,
+            timestep_shift=args.timestep_shift,
+        )
+    finally:
+        torch.set_default_device(default_device)
     target = inferencer.vae_transform.resize_transform(target)
 
     checkpoint_name = os.path.basename(os.path.normpath(args.checkpoint_path))
