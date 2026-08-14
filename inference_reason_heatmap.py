@@ -52,10 +52,10 @@ def build_model(model_path, checkpoint_path, device):
     model = load_checkpoint_and_dispatch(
         model,
         checkpoint=checkpoint_path,
-        device_map={"": device},
+        device_map={"": "cpu"},
         dtype=torch.bfloat16,
     )
-    model.to(dtype=torch.bfloat16)
+    model.to(device=device, dtype=torch.bfloat16)
     model.requires_grad_(False)
     model.eval()
     vae_model.to(device).eval()
