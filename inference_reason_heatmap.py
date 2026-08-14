@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=3.0)
     parser.add_argument("--cfg_text_scale", type=float, default=1.0)
-    parser.add_argument("--cfg_img_scale", type=float, default=1.0)
+    parser.add_argument("--cfg_img_scale", type=float, default=2.0)
     return parser.parse_args()
 
 

@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=3.0)
     parser.add_argument("--cfg_text_scale", type=float, default=1.0)
-    parser.add_argument("--cfg_img_scale", type=float, default=1.0)
+    parser.add_argument("--cfg_img_scale", type=float, default=2.0)
     args = parser.parse_args()
     variant = LORA_VARIANTS[args.lora_variant]
     args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
