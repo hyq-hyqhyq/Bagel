@@ -21,7 +21,7 @@ def parse_args():
         "--checkpoint_path",
         default=(
             "/data/bagel/repo/Bagel/results/reason_heatmap/checkpoints/"
-            "0010000/ema.safetensors"
+            "0012000/model.safetensors"
         ),
     )
     parser.add_argument(
@@ -67,7 +67,7 @@ def main():
     run_inference(
         args,
         model_loader=build_model,
-        metadata_extra={"checkpoint_type": "full_ema"},
+        metadata_extra={"checkpoint_type": "full_model"},
     )
 
 
