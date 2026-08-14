@@ -30,6 +30,22 @@ from modeling.qwen2 import Qwen2Tokenizer
 
 SINGLE_IMAGE_PROMPT = "Analyze the perspective and projection realism of this image."
 PAIR_PROMPT = "Compare the two images and explain the perspective and projection realism difference."
+LORA_VARIANTS = {
+    "normal": {
+        "checkpoint_path": (
+            "/data/bagel/repo/Bagel/results/reason_heatmap_lora/"
+            "checkpoints/0006200"
+        ),
+        "output_dir": "./results/reason_heatmap_lora/inference",
+    },
+    "mse": {
+        "checkpoint_path": (
+            "/data/bagel/repo/Bagel/results/reason_heatmap_lora_mse_4gpu/"
+            "checkpoints/0006000"
+        ),
+        "output_dir": "./results/reason_heatmap_lora_mse_4gpu/inference",
+    },
+}
 
 
 def parse_args():
@@ -41,11 +57,14 @@ def parse_args():
         default="/data/bagel/repo/agent/bpipe/models/BAGEL-7B-MoT",
     )
     parser.add_argument(
+        "--lora_variant",
+        choices=tuple(LORA_VARIANTS),
+        default="normal",
+        help="Use the normal LoRA by default, or select the MSE-only LoRA.",
+    )
+    parser.add_argument(
         "--checkpoint_path",
-        default=(
-            "/data/bagel/repo/Bagel/results/reason_heatmap_lora_mse_4gpu/"
-            "checkpoints/0006000"
-        ),
+        default=None,
     )
     parser.add_argument(
         "--data_dir",
@@ -60,14 +79,18 @@ def parse_args():
     )
     parser.add_argument(
         "--output_dir",
-        default="./results/reason_heatmap_lora_mse_4gpu/inference",
+        default=None,
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=3.0)
     parser.add_argument("--cfg_text_scale", type=float, default=1.0)
     parser.add_argument("--cfg_img_scale", type=float, default=1.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    variant = LORA_VARIANTS[args.lora_variant]
+    args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
+    args.output_dir = args.output_dir or variant["output_dir"]
+    return args
 
 
 def set_seed(seed):
@@ -241,6 +264,7 @@ def main():
         image.save(os.path.join(sample_dir, f"input_{index}.png"))
 
     metadata = {
+        "lora_variant": args.lora_variant,
         "checkpoint_path": args.checkpoint_path,
         "metadata_path": metadata_path,
         "row_index": args.row_index,
