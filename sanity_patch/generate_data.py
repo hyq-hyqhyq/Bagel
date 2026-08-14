@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
+from tqdm import tqdm
 
 
 SPLITS = ("train", "val", "test")
@@ -26,6 +27,11 @@ COLORS = {
 DEFAULT_EXPLANATION_TEMPLATE = (
     "A {color} rectangular patch appears in the {region} region of the image "
     "as a synthetic local corruption."
+)
+GOOD_REASON = "No synthetic rectangular patch corruption is present in this image."
+PAIR_EXPLANATION_TEMPLATE = (
+    "Compared with the original image, the corrupted image contains a {color} "
+    "rectangular patch in the {region} region as a synthetic local corruption."
 )
 DEFAULT_SOURCE_ROOT = os.environ.get(
     "BAGEL_REASON_HEATMAP_DATA_DIR",
@@ -240,6 +246,10 @@ def generate_sample(
         color=color_name,
         region=region_name,
     )
+    pair_explanation = PAIR_EXPLANATION_TEMPLATE.format(
+        color=color_name,
+        region=region_name,
+    )
     return {
         "sample_id": sample_id,
         "split": split,
@@ -251,6 +261,12 @@ def generate_sample(
         "color_name": color_name,
         "region_name": region_name,
         "explanation": explanation,
+        "good_image": metadata_source_path,
+        "bad_image": relative_path(corrupted_path, output_dir),
+        "bad_heatmap": relative_path(heatmap_path, output_dir),
+        "good_reason": GOOD_REASON,
+        "bad_reason": explanation,
+        "pair_reason": pair_explanation,
     }
 
 
@@ -273,7 +289,12 @@ def main():
     counts = {}
     for split in SPLITS:
         records = []
-        for row_index, row, source_path in rows_by_split[split]:
+        rows = rows_by_split[split]
+        for row_index, row, source_path in tqdm(
+            rows,
+            desc=f"Generating {split}",
+            unit="image",
+        ):
             records.append(
                 generate_sample(
                     split,
@@ -300,6 +321,9 @@ def main():
         "bbox_xyxy_convention": "[x0, y0, x1, y1] with x1/y1 exclusive",
         "heatmap_values": [0, 255],
         "explanation_template": DEFAULT_EXPLANATION_TEMPLATE,
+        "good_reason": GOOD_REASON,
+        "pair_explanation_template": PAIR_EXPLANATION_TEMPLATE,
+        "reason_heatmap_compatible": True,
         "counts": counts,
     }
     with (output_dir / "metadata" / "dataset_info.json").open(
