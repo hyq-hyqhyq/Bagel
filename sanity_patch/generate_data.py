@@ -45,6 +45,7 @@ def parse_args():
     )
     parser.add_argument("--source-root", type=Path, default=Path(DEFAULT_SOURCE_ROOT))
     parser.add_argument("--output-dir", type=Path, default=Path("sanity_patch_data"))
+    parser.add_argument("--splits", nargs="+", choices=SPLITS, default=list(SPLITS))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-area-fraction", type=float, default=0.02)
     parser.add_argument("--max-area-fraction", type=float, default=0.10)
@@ -64,7 +65,7 @@ def parse_args():
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace an existing non-empty output directory.",
+        help="Replace existing generated assets for the selected splits.",
     )
     return parser.parse_args()
 
@@ -86,11 +87,11 @@ def validate_args(args):
         raise ValueError("Refusing to use the repository root as output-dir.")
 
 
-def read_split_rows(source_root, max_samples_per_split=None):
+def read_split_rows(source_root, splits, max_samples_per_split=None):
     rows_by_split = {}
     source_owners = {}
 
-    for split in SPLITS:
+    for split in splits:
         metadata_path = source_root / "metadata" / f"{split}.jsonl"
         if not metadata_path.is_file():
             raise FileNotFoundError(f"Missing metadata file: {metadata_path}")
@@ -124,16 +125,29 @@ def read_split_rows(source_root, max_samples_per_split=None):
     return rows_by_split
 
 
-def prepare_output_dir(output_dir, overwrite):
+def prepare_output_dir(output_dir, splits, overwrite):
     if output_dir.exists() and any(output_dir.iterdir()):
         if not overwrite:
             raise FileExistsError(
                 f"Output directory is not empty: {output_dir}. "
                 "Use --overwrite to replace it."
             )
-        shutil.rmtree(output_dir)
+        if set(splits) == set(SPLITS):
+            shutil.rmtree(output_dir)
+        else:
+            for split in splits:
+                for path in (
+                    output_dir / "images" / "source" / split,
+                    output_dir / "images" / "corrupted" / split,
+                    output_dir / "heatmaps" / split,
+                    output_dir / "metadata" / f"{split}.jsonl",
+                ):
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    elif path.is_file():
+                        path.unlink()
 
-    for split in SPLITS:
+    for split in splits:
         (output_dir / "images" / "source" / split).mkdir(parents=True, exist_ok=True)
         (output_dir / "images" / "corrupted" / split).mkdir(
             parents=True, exist_ok=True
@@ -283,11 +297,13 @@ def main():
     validate_args(args)
     source_root = args.source_root.resolve()
     output_dir = args.output_dir.resolve()
-    rows_by_split = read_split_rows(source_root, args.max_samples_per_split)
-    prepare_output_dir(output_dir, args.overwrite)
+    rows_by_split = read_split_rows(
+        source_root, args.splits, args.max_samples_per_split
+    )
+    prepare_output_dir(output_dir, args.splits, args.overwrite)
 
     counts = {}
-    for split in SPLITS:
+    for split in args.splits:
         records = []
         rows = rows_by_split[split]
         for row_index, row, source_path in tqdm(
@@ -309,7 +325,14 @@ def main():
         counts[split] = len(records)
         print(f"Generated {len(records)} {split} samples.")
 
-    dataset_info = {
+    info_path = output_dir / "metadata" / "dataset_info.json"
+    if info_path.is_file():
+        with info_path.open("r", encoding="utf-8") as f:
+            dataset_info = json.load(f)
+    else:
+        dataset_info = {}
+    dataset_info.update(
+        {
         "source_root": str(source_root),
         "seed": args.seed,
         "colors": COLORS,
@@ -324,11 +347,10 @@ def main():
         "good_reason": GOOD_REASON,
         "pair_explanation_template": PAIR_EXPLANATION_TEMPLATE,
         "reason_heatmap_compatible": True,
-        "counts": counts,
-    }
-    with (output_dir / "metadata" / "dataset_info.json").open(
-        "w", encoding="utf-8"
-    ) as f:
+        "counts": {**dataset_info.get("counts", {}), **counts},
+        }
+    )
+    with info_path.open("w", encoding="utf-8") as f:
         json.dump(dataset_info, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
