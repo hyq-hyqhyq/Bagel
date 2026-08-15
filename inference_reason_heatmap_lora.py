@@ -60,7 +60,7 @@ class DeviceImageTransform:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run single-GPU teacher-forced inference with a reason heatmap LoRA."
+        description="Run single-GPU endpoint inference with a reason heatmap LoRA."
     )
     parser.add_argument(
         "--model_path",
@@ -82,6 +82,7 @@ def parse_args():
     )
     parser.add_argument("--metadata_path", default=None)
     parser.add_argument("--row_index", type=int, default=0)
+    parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument(
         "--sample_type",
         choices=("good", "bad", "pair"),
@@ -94,12 +95,14 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=3.0)
-    parser.add_argument("--cfg_text_scale", type=float, default=1.0)
+    parser.add_argument("--cfg_text_scale", type=float, default=4.0)
     parser.add_argument("--cfg_img_scale", type=float, default=2.0)
     args = parser.parse_args()
     variant = LORA_VARIANTS[args.lora_variant]
     args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
     args.output_dir = args.output_dir or variant["output_dir"]
+    if args.num_samples <= 0:
+        raise ValueError("num_samples must be positive.")
     return args
 
 
@@ -206,25 +209,24 @@ def build_model(model_path, checkpoint_path, device):
 
 
 @torch.inference_mode()
-def generate_heatmap(
+def generate_reason_heatmap(
     inferencer,
     images,
     prompt,
-    reason,
     cfg_text_scale,
     cfg_img_scale,
     num_timesteps,
     timestep_shift,
 ):
     outputs = inferencer.interleave_inference(
-        [*images, prompt, f"<think>{reason}</think>"],
-        think=False,
+        [*images, prompt],
+        think=True,
         cfg_text_scale=cfg_text_scale,
         cfg_img_scale=cfg_img_scale,
         timestep_shift=timestep_shift,
         num_timesteps=num_timesteps,
     )
-    return outputs[-1]
+    return outputs[0], outputs[-1]
 
 
 def run_inference(args, model_loader, metadata_extra=None):
@@ -238,11 +240,6 @@ def run_inference(args, model_loader, metadata_extra=None):
     metadata_path = args.metadata_path or os.path.join(
         args.data_dir, "metadata", "val.jsonl"
     )
-    row = load_jsonl_row(metadata_path, args.row_index)
-    images, image_paths, prompt, reason, target = prepare_sample(
-        row, args.data_dir, args.sample_type
-    )
-
     model, vae_model = model_loader(args.model_path, args.checkpoint_path, device)
     tokenizer = Qwen2Tokenizer.from_pretrained(args.model_path)
     tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
@@ -259,58 +256,66 @@ def run_inference(args, model_loader, metadata_extra=None):
         new_token_ids=new_token_ids,
     )
 
-    default_device = torch.get_default_device()
-    torch.set_default_device(device)
-    try:
-        prediction = generate_heatmap(
-            inferencer=inferencer,
-            images=images,
-            prompt=prompt,
-            reason=reason,
-            cfg_text_scale=args.cfg_text_scale,
-            cfg_img_scale=args.cfg_img_scale,
-            num_timesteps=args.num_timesteps,
-            timestep_shift=args.timestep_shift,
-        )
-    finally:
-        torch.set_default_device(default_device)
-    target = inferencer.vae_transform.resize_transform(target)
-
     checkpoint_name = os.path.basename(os.path.normpath(args.checkpoint_path))
     if checkpoint_name.endswith(".safetensors"):
         checkpoint_name = os.path.basename(
             os.path.dirname(os.path.normpath(args.checkpoint_path))
         )
-    sample_dir = os.path.join(
-        args.output_dir,
-        f"{checkpoint_name}_row{args.row_index}_{args.sample_type}",
-    )
-    os.makedirs(sample_dir, exist_ok=True)
-    prediction.save(os.path.join(sample_dir, "prediction.png"))
-    target.save(os.path.join(sample_dir, "target.png"))
-    for index, image in enumerate(images):
-        image.save(os.path.join(sample_dir, f"input_{index}.png"))
+    default_device = torch.get_default_device()
+    torch.set_default_device(device)
+    try:
+        for row_index in range(args.row_index, args.row_index + args.num_samples):
+            row = load_jsonl_row(metadata_path, row_index)
+            images, image_paths, prompt, target_reason, target = prepare_sample(
+                row, args.data_dir, args.sample_type
+            )
+            generated_reason, prediction = generate_reason_heatmap(
+                inferencer=inferencer,
+                images=images,
+                prompt=prompt,
+                cfg_text_scale=args.cfg_text_scale,
+                cfg_img_scale=args.cfg_img_scale,
+                num_timesteps=args.num_timesteps,
+                timestep_shift=args.timestep_shift,
+            )
+            target = inferencer.vae_transform.resize_transform(target)
 
-    metadata = {
-        "checkpoint_path": args.checkpoint_path,
-        "metadata_path": metadata_path,
-        "row_index": args.row_index,
-        "sample_type": args.sample_type,
-        "image_paths": image_paths,
-        "prompt": prompt,
-        "reason": reason,
-        "seed": args.seed,
-        "num_timesteps": args.num_timesteps,
-        "timestep_shift": args.timestep_shift,
-        "cfg_text_scale": args.cfg_text_scale,
-        "cfg_img_scale": args.cfg_img_scale,
-    }
-    if metadata_extra:
-        metadata.update(metadata_extra)
-    with open(os.path.join(sample_dir, "metadata.json"), "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+            sample_dir = os.path.join(
+                args.output_dir,
+                f"{checkpoint_name}_row{row_index:04d}_{args.sample_type}",
+            )
+            os.makedirs(sample_dir, exist_ok=True)
+            prediction.save(os.path.join(sample_dir, "prediction.png"))
+            target.save(os.path.join(sample_dir, "target.png"))
+            for index, image in enumerate(images):
+                image.save(os.path.join(sample_dir, f"input_{index}.png"))
+            with open(os.path.join(sample_dir, "reason.txt"), "w", encoding="utf-8") as f:
+                f.write(generated_reason)
 
-    print(f"Saved inference outputs to {sample_dir}")
+            metadata = {
+                "checkpoint_path": args.checkpoint_path,
+                "metadata_path": metadata_path,
+                "row_index": row_index,
+                "sample_type": args.sample_type,
+                "image_paths": image_paths,
+                "prompt": prompt,
+                "target_reason": target_reason,
+                "seed": args.seed,
+                "num_timesteps": args.num_timesteps,
+                "timestep_shift": args.timestep_shift,
+                "cfg_text_scale": args.cfg_text_scale,
+                "cfg_img_scale": args.cfg_img_scale,
+            }
+            if metadata_extra:
+                metadata.update(metadata_extra)
+            with open(
+                os.path.join(sample_dir, "metadata.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+            print(f"Saved inference outputs to {sample_dir}")
+    finally:
+        torch.set_default_device(default_device)
 
 
 def main():

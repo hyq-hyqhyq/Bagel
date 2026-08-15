@@ -39,14 +39,6 @@ from transformers.optimization import (
     get_constant_schedule_with_warmup,
     get_cosine_with_min_lr_schedule_with_warmup,
 )
-from data.transforms import ImageTransform
-from inferencer import InterleaveInferencer
-from inference_reason_heatmap_lora import (
-    DeviceImageTransform,
-    load_jsonl_row,
-    prepare_sample,
-)
-
 from data import dataset_base
 from data.dataset_base import DataConfig, PackedDataset, collate_wrapper
 from data.reason_heatmap_dataset_info import DATASET_INFO, DATASET_REGISTRY
@@ -142,81 +134,6 @@ def sync_lora_gradients(lora_params):
         if param.grad is not None:
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
             param.grad.div_(dist.get_world_size())
-
-
-def run_validation(
-    fsdp_model,
-    vae_model,
-    tokenizer,
-    new_token_ids,
-    device,
-    data_root,
-    output_dir,
-    step,
-    num_samples,
-    logger,
-):
-    metadata_path = os.path.join(data_root, "metadata", "val.jsonl")
-    torch_device = torch.device("cuda", device)
-    fsdp_model.eval()
-    dist.barrier()
-    if not os.path.isfile(metadata_path):
-        if dist.get_rank() == 0:
-            logger.warning(f"Validation metadata not found: {metadata_path}")
-        fsdp_model.train()
-        dist.barrier()
-        return
-
-    default_device = torch.get_default_device()
-    torch.set_default_device(torch_device)
-
-    torch.cuda.empty_cache()
-    with FSDP.summon_full_params(
-        fsdp_model, recurse=False, writeback=False
-    ):
-        inferencer = InterleaveInferencer(
-            model=fsdp_model.module,
-            vae_model=vae_model,
-            tokenizer=tokenizer,
-            vae_transform=DeviceImageTransform(
-                ImageTransform(1024, 512, 16), torch_device
-            ),
-            vit_transform=DeviceImageTransform(
-                ImageTransform(518, 224, 14), torch_device
-            ),
-            new_token_ids=new_token_ids,
-        )
-        for row_index in range(num_samples):
-            row = load_jsonl_row(metadata_path, row_index)
-            images, _, prompt, _, target = prepare_sample(
-                row, data_root, "bad"
-            )
-            generated_reason, prediction = inferencer.interleave_inference(
-                [*images, prompt],
-                think=True,
-                cfg_text_scale=4.0,
-                cfg_img_scale=2.0,
-                num_timesteps=50,
-                timestep_shift=3.0,
-            )
-            target = inferencer.vae_transform.resize_transform(target)
-            if dist.get_rank() == 0:
-                sample_dir = os.path.join(
-                    output_dir,
-                    f"step_{step:07d}",
-                    f"row_{row_index:04d}_bad",
-                )
-                os.makedirs(sample_dir, exist_ok=True)
-                prediction.save(os.path.join(sample_dir, "prediction.png"))
-                target.save(os.path.join(sample_dir, "target.png"))
-                images[0].save(os.path.join(sample_dir, "input.png"))
-                with open(os.path.join(sample_dir, "reason.txt"), "w") as f:
-                    f.write(generated_reason)
-
-    torch.set_default_device(default_device)
-    torch.cuda.empty_cache()
-    dist.barrier()
-    fsdp_model.train()
 
 
 @dataclass
@@ -532,17 +449,9 @@ class TrainingArguments:
         default=None,
         metadata={"help": "modules of base model where LoRA is applied."}
     )
-    val_every: int = field(
-        default=500,
-        metadata={"help": "Run image validation every N optimizer steps; 0 disables validation."}
-    )
-    val_num_samples: int = field(
-        default=5,
-        metadata={"help": "Number of leading validation rows used for image validation."}
-    )
-    val_output_dir: str = field(
-        default=None,
-        metadata={"help": "Directory for validation images; defaults to results_dir/val_samples."}
+    stop_after_step: int = field(
+        default=0,
+        metadata={"help": "Save and stop after this optimizer step; 0 disables staged training."}
     )
 
 
@@ -863,12 +772,6 @@ def main():
         scheduler.step()
         # fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
 
-        should_validate = (
-            training_args.val_every > 0
-            and curr_step > 0
-            and curr_step % training_args.val_every == 0
-        )
-
         # Log loss values:
         if curr_step % training_args.log_every == 0:
             total_samples = torch.tensor(len(data['sample_lens']), device=device)
@@ -934,25 +837,12 @@ def main():
             )
             last_checkpoint_step = curr_step
 
-        if should_validate:
-            del data, loss, ce, mse, loss_dict, ce_loss_weights
-            optimizer.zero_grad(set_to_none=True)
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            run_validation(
-                fsdp_model=fsdp_model,
-                vae_model=vae_model,
-                tokenizer=tokenizer,
-                new_token_ids=new_token_ids,
-                device=device,
-                data_root=os.environ["BAGEL_REASON_HEATMAP_DATA_DIR"],
-                output_dir=training_args.val_output_dir or os.path.join(
-                    training_args.results_dir, "val_samples"
-                ),
-                step=curr_step,
-                num_samples=training_args.val_num_samples,
-                logger=logger,
-            )
+        if (
+            training_args.stop_after_step > 0
+            and curr_step >= training_args.stop_after_step
+        ):
+            logger.info(f"Stopping after step {curr_step}.")
+            break
 
     if last_train_step >= train_step and last_train_step != last_checkpoint_step:
         if dist.get_rank() == 0:
