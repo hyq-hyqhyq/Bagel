@@ -172,7 +172,7 @@ def run_validation(
 
     torch.cuda.empty_cache()
     with FSDP.summon_full_params(
-        fsdp_model, recurse=True, writeback=False, rank0_only=True
+        fsdp_model, recurse=False, writeback=False, rank0_only=True
     ):
         if dist.get_rank() == 0:
             inferencer = InterleaveInferencer(
@@ -863,28 +863,11 @@ def main():
         scheduler.step()
         # fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
 
-        if (
+        should_validate = (
             training_args.val_every > 0
             and curr_step > 0
             and curr_step % training_args.val_every == 0
-        ):
-            del data
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            run_validation(
-                fsdp_model=fsdp_model,
-                vae_model=vae_model,
-                tokenizer=tokenizer,
-                new_token_ids=new_token_ids,
-                device=device,
-                data_root=os.environ["BAGEL_REASON_HEATMAP_DATA_DIR"],
-                output_dir=training_args.val_output_dir or os.path.join(
-                    training_args.results_dir, "val_samples"
-                ),
-                step=curr_step,
-                num_samples=training_args.val_num_samples,
-                logger=logger,
-            )
+        )
 
         # Log loss values:
         if curr_step % training_args.log_every == 0:
@@ -950,6 +933,26 @@ def main():
                 data_status=gather_list
             )
             last_checkpoint_step = curr_step
+
+        if should_validate:
+            del data, loss, ce, mse, loss_dict, ce_loss_weights
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            run_validation(
+                fsdp_model=fsdp_model,
+                vae_model=vae_model,
+                tokenizer=tokenizer,
+                new_token_ids=new_token_ids,
+                device=device,
+                data_root=os.environ["BAGEL_REASON_HEATMAP_DATA_DIR"],
+                output_dir=training_args.val_output_dir or os.path.join(
+                    training_args.results_dir, "val_samples"
+                ),
+                step=curr_step,
+                num_samples=training_args.val_num_samples,
+                logger=logger,
+            )
 
     if last_train_step >= train_step and last_train_step != last_checkpoint_step:
         if dist.get_rank() == 0:
