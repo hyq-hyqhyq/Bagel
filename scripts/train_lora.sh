@@ -6,6 +6,9 @@ output_path=${output_path:-./results/reason_heatmap_lora}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
 nproc_per_node=${nproc_per_node:-8}
 total_steps=${total_steps:-20000}
+save_every=${save_every:-200}
+val_every=${val_every:-500}
+val_num_samples=${val_num_samples:-5}
 wandb_name=${wandb_name:-reason_heatmap_lora_$(date +%Y%m%d_%H%M%S)}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-False}
@@ -41,11 +44,11 @@ torchrun \
   --text_cond_dropout_prob 0. \
   --vae_cond_dropout_prob 0. \
   --vit_cond_dropout_prob 0. \
-  --save_every 200 \
+  --save_every "$save_every" \
   --lora_rank 256 \
   --lora_alpha 512 \
-  --val_every 500 \
-  --val_num_samples 5 \
+  --val_every "$val_every" \
+  --val_num_samples "$val_num_samples" \
   --val_output_dir "$output_path/val_samples" \
   --results_dir "$output_path" \
   --checkpoint_dir "$ckpt_path"
