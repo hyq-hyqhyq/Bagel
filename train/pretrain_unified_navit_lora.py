@@ -172,35 +172,35 @@ def run_validation(
 
     torch.cuda.empty_cache()
     with FSDP.summon_full_params(
-        fsdp_model, recurse=False, writeback=False, rank0_only=True
+        fsdp_model, recurse=False, writeback=False
     ):
-        if dist.get_rank() == 0:
-            inferencer = InterleaveInferencer(
-                model=fsdp_model.module,
-                vae_model=vae_model,
-                tokenizer=tokenizer,
-                vae_transform=DeviceImageTransform(
-                    ImageTransform(1024, 512, 16), torch_device
-                ),
-                vit_transform=DeviceImageTransform(
-                    ImageTransform(518, 224, 14), torch_device
-                ),
-                new_token_ids=new_token_ids,
+        inferencer = InterleaveInferencer(
+            model=fsdp_model.module,
+            vae_model=vae_model,
+            tokenizer=tokenizer,
+            vae_transform=DeviceImageTransform(
+                ImageTransform(1024, 512, 16), torch_device
+            ),
+            vit_transform=DeviceImageTransform(
+                ImageTransform(518, 224, 14), torch_device
+            ),
+            new_token_ids=new_token_ids,
+        )
+        for row_index in range(num_samples):
+            row = load_jsonl_row(metadata_path, row_index)
+            images, _, prompt, _, target = prepare_sample(
+                row, data_root, "bad"
             )
-            for row_index in range(num_samples):
-                row = load_jsonl_row(metadata_path, row_index)
-                images, _, prompt, _, target = prepare_sample(
-                    row, data_root, "bad"
-                )
-                generated_reason, prediction = inferencer.interleave_inference(
-                    [*images, prompt],
-                    think=True,
-                    cfg_text_scale=4.0,
-                    cfg_img_scale=2.0,
-                    num_timesteps=50,
-                    timestep_shift=3.0,
-                )
-                target = inferencer.vae_transform.resize_transform(target)
+            generated_reason, prediction = inferencer.interleave_inference(
+                [*images, prompt],
+                think=True,
+                cfg_text_scale=4.0,
+                cfg_img_scale=2.0,
+                num_timesteps=50,
+                timestep_shift=3.0,
+            )
+            target = inferencer.vae_transform.resize_transform(target)
+            if dist.get_rank() == 0:
                 sample_dir = os.path.join(
                     output_dir,
                     f"step_{step:07d}",
