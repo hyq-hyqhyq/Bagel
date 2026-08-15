@@ -8,6 +8,7 @@ nproc_per_node=${nproc_per_node:-8}
 total_steps=${total_steps:-20000}
 wandb_name=${wandb_name:-reason_heatmap_lora_$(date +%Y%m%d_%H%M%S)}
 wandb_runid=${wandb_runid:-0}
+wandb_offline=${wandb_offline:-False}
 
 export BAGEL_REASON_HEATMAP_DATA_DIR="$data_path"
 
@@ -19,7 +20,7 @@ torchrun \
   --warmup_steps 200 \
   --total_steps "$total_steps" \
   --model_path $model_path \
-  --wandb_offline True \
+  --wandb_offline "$wandb_offline" \
   --wandb_name "$wandb_name" \
   --wandb_runid "$wandb_runid" \
   --layer_module Qwen2MoTDecoderLayer \
@@ -43,5 +44,8 @@ torchrun \
   --save_every 200 \
   --lora_rank 256 \
   --lora_alpha 512 \
+  --val_every 500 \
+  --val_num_samples 5 \
+  --val_output_dir "$output_path/val_samples" \
   --results_dir "$output_path" \
   --checkpoint_dir "$ckpt_path"

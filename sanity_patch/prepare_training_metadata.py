@@ -19,6 +19,7 @@ def parse_args():
         description="Add reason_heatmap training fields to sanity patch metadata."
     )
     parser.add_argument("--data-root", type=Path, default=Path("sanity_patch_data"))
+    parser.add_argument("--splits", nargs="+", choices=SPLITS, default=list(SPLITS))
     return parser.parse_args()
 
 
@@ -87,24 +88,25 @@ def prepare_split(data_root, split):
 def main():
     args = parse_args()
     data_root = args.data_root.resolve()
-    counts = {split: prepare_split(data_root, split) for split in SPLITS}
+    counts = {split: prepare_split(data_root, split) for split in args.splits}
 
     info_path = data_root / "metadata" / "dataset_info.json"
-    with info_path.open("r", encoding="utf-8") as f:
-        dataset_info = json.load(f)
-    dataset_info.update(
-        {
-            "good_reason": GOOD_REASON,
-            "pair_explanation_template": PAIR_EXPLANATION_TEMPLATE,
-            "reason_heatmap_compatible": True,
-            "counts": counts,
-        }
-    )
-    temporary_info_path = info_path.with_suffix(".json.tmp")
-    with temporary_info_path.open("w", encoding="utf-8") as f:
-        json.dump(dataset_info, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    temporary_info_path.replace(info_path)
+    if set(args.splits) == set(SPLITS) and info_path.is_file():
+        with info_path.open("r", encoding="utf-8") as f:
+            dataset_info = json.load(f)
+        dataset_info.update(
+            {
+                "good_reason": GOOD_REASON,
+                "pair_explanation_template": PAIR_EXPLANATION_TEMPLATE,
+                "reason_heatmap_compatible": True,
+                "counts": counts,
+            }
+        )
+        temporary_info_path = info_path.with_suffix(".json.tmp")
+        with temporary_info_path.open("w", encoding="utf-8") as f:
+            json.dump(dataset_info, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        temporary_info_path.replace(info_path)
     print(f"Prepared training metadata in {data_root}")
 
 
