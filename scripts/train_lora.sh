@@ -9,6 +9,8 @@ total_steps=${total_steps:-20000}
 save_every=${save_every:-200}
 val_every=${val_every:-500}
 val_num_samples=${val_num_samples:-5}
+mse_weight=${mse_weight:-50}
+ce_weight=${ce_weight:-0.1}
 wandb_name=${wandb_name:-reason_heatmap_lora_$(date +%Y%m%d_%H%M%S)}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-False}
@@ -44,6 +46,8 @@ torchrun \
   --text_cond_dropout_prob 0. \
   --vae_cond_dropout_prob 0. \
   --vit_cond_dropout_prob 0. \
+  --mse_weight "$mse_weight" \
+  --ce_weight "$ce_weight" \
   --save_every "$save_every" \
   --lora_rank 256 \
   --lora_alpha 512 \
