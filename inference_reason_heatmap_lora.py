@@ -207,13 +207,19 @@ def build_model(model_path, checkpoint_path, device):
         load_file(adapter_path, device="cpu")
     )
     load_result = set_peft_model_state_dict(model, adapter_state_dict)
-    print(load_result)
-    if load_result.unexpected_keys or load_result.missing_keys:
+    missing_lora_keys = [
+        key for key in load_result.missing_keys if ".lora_" in key
+    ]
+    if load_result.unexpected_keys or missing_lora_keys:
         raise RuntimeError(
             "LoRA adapter keys did not match the inference model: "
-            f"missing={load_result.missing_keys}, "
+            f"missing_lora={missing_lora_keys}, "
             f"unexpected={load_result.unexpected_keys}"
         )
+    print(
+        "Loaded LoRA adapter; ignored "
+        f"{len(load_result.missing_keys)} base-model keys."
+    )
     del adapter_state_dict
 
     model.to(dtype=torch.bfloat16)
