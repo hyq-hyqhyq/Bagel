@@ -453,6 +453,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Apply LoRA to the llm2vae visual flow head."}
     )
+    train_vae2llm_lora: bool = field(
+        default=False,
+        metadata={"help": "Apply LoRA to the vae2llm visual input head."}
+    )
     stop_after_step: int = field(
         default=0,
         metadata={"help": "Save and stop after this optimizer step; 0 disables staged training."}
@@ -618,6 +622,11 @@ def main():
         and "llm2vae" not in lora_target_modules
     ):
         lora_target_modules.append("llm2vae")
+    if (
+        training_args.train_vae2llm_lora
+        and "vae2llm" not in lora_target_modules
+    ):
+        lora_target_modules.append("vae2llm")
 
     peft_config = LoraConfig(
         r=training_args.lora_rank,
