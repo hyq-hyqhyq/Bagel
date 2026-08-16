@@ -180,6 +180,15 @@ def build_model_architecture(model_path):
     return model, vae_model
 
 
+def normalize_lora_state_dict(state_dict):
+    return {
+        key.replace("_fsdp_wrapped_module.", "").replace(
+            "_checkpoint_wrapped_module.", ""
+        ): value
+        for key, value in state_dict.items()
+    }
+
+
 def build_model(model_path, checkpoint_path, device):
     model, vae_model = build_model_architecture(model_path)
 
@@ -194,11 +203,17 @@ def build_model(model_path, checkpoint_path, device):
     lora_config.inference_mode = True
     model = get_peft_model(model, lora_config)
     adapter_path = os.path.join(checkpoint_path, "adapter_model.safetensors")
-    adapter_state_dict = load_file(adapter_path, device="cpu")
+    adapter_state_dict = normalize_lora_state_dict(
+        load_file(adapter_path, device="cpu")
+    )
     load_result = set_peft_model_state_dict(model, adapter_state_dict)
     print(load_result)
-    if load_result.unexpected_keys:
-        raise RuntimeError(f"Unexpected LoRA keys: {load_result.unexpected_keys}")
+    if load_result.unexpected_keys or load_result.missing_keys:
+        raise RuntimeError(
+            "LoRA adapter keys did not match the inference model: "
+            f"missing={load_result.missing_keys}, "
+            f"unexpected={load_result.unexpected_keys}"
+        )
     del adapter_state_dict
 
     model.to(dtype=torch.bfloat16)
