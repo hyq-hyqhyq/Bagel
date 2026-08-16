@@ -5,6 +5,7 @@ data_path=${BAGEL_REASON_HEATMAP_DATA_DIR:-/data/bagel/data/perspective_5k/canon
 output_path=${output_path:-./results/reason_heatmap_lora}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
 nproc_per_node=${nproc_per_node:-8}
+master_port=${master_port:-29500}
 total_steps=${total_steps:-20000}
 save_every=${save_every:-200}
 stop_after_step=${stop_after_step:-0}
@@ -19,6 +20,7 @@ export BAGEL_REASON_HEATMAP_DATA_DIR="$data_path"
 torchrun \
   --nnodes=1 \
   --nproc_per_node=$nproc_per_node \
+  --master_port="$master_port" \
   train/pretrain_unified_navit_lora.py \
   --dataset_config_file ./data/configs/reason_heatmap.yaml \
   --warmup_steps 200 \
