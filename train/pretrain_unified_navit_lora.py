@@ -449,6 +449,10 @@ class TrainingArguments:
         default=None,
         metadata={"help": "modules of base model where LoRA is applied."}
     )
+    train_llm2vae_lora: bool = field(
+        default=False,
+        metadata={"help": "Apply LoRA to the llm2vae visual flow head."}
+    )
     stop_after_step: int = field(
         default=0,
         metadata={"help": "Save and stop after this optimizer step; 0 disables staged training."}
@@ -598,11 +602,28 @@ def main():
         None,
         resume_from_ema=training_args.finetune_from_ema,
     )
+    lora_target_modules = [
+        "q_proj",
+        "v_proj",
+        "q_proj_moe_gen",
+        "v_proj_moe_gen",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+    if training_args.lora_target_modules is not None:
+        lora_target_modules = training_args.lora_target_modules.split(",")
+    if (
+        training_args.train_llm2vae_lora
+        and "llm2vae" not in lora_target_modules
+    ):
+        lora_target_modules.append("llm2vae")
+
     peft_config = LoraConfig(
         r=training_args.lora_rank,
         lora_alpha=training_args.lora_alpha, # X + lora_alpha/lora_rank * AB
         task_type=None,
-        target_modules=["q_proj", "v_proj", "q_proj_moe_gen", "v_proj_moe_gen", "gate_proj", "up_proj", "down_proj"] if training_args.lora_target_modules is None else training_args.lora_target_modules.split(","), # optionally indicate target modules
+        target_modules=lora_target_modules,
     )
     model = get_peft_model(model, peft_config)
     if not resume_model_only and resume_from is not None:
