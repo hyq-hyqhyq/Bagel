@@ -466,6 +466,7 @@ class TrainingArguments:
 def main():
     assert torch.cuda.is_available()
     dist.init_process_group("nccl")
+    data_status_group = dist.new_group(backend="gloo")
     device = dist.get_rank() % torch.cuda.device_count()
     torch.cuda.set_device(device)
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
@@ -852,7 +853,9 @@ def main():
                 gather_list = [None] * dist.get_world_size()
             else:
                 gather_list = None
-            dist.gather_object(data_status, gather_list, dst=0)
+            dist.gather_object(
+                data_status, gather_list, dst=0, group=data_status_group
+            )
 
             save_lora_checkpoint(
                 checkpoint_dir=training_args.checkpoint_dir,
@@ -879,7 +882,9 @@ def main():
             gather_list = [None] * dist.get_world_size()
         else:
             gather_list = None
-        dist.gather_object(data_status, gather_list, dst=0)
+        dist.gather_object(
+            data_status, gather_list, dst=0, group=data_status_group
+        )
         save_lora_checkpoint(
             checkpoint_dir=training_args.checkpoint_dir,
             train_step=last_train_step,
