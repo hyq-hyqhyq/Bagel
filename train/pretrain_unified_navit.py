@@ -364,6 +364,16 @@ class TrainingArguments:
         default=0.0,
         metadata={"help": "Per-GPU peak BF16 TFLOPs used to compute MFU; leave at 0 to auto-detect."}
     )
+    model_init_dtype: str = field(
+        default="bfloat16",
+        metadata={
+            "help": (
+                "Parameter dtype used while constructing the model before FSDP wrapping. "
+                "Use bfloat16 for large full-model runs to avoid an FP32 model-plus-EMA "
+                "host-memory spike on every rank."
+            )
+        },
+    )
 
     # --- distributed training / FSDP ---
     num_replicate: int = field(
@@ -479,6 +489,21 @@ def main():
     set_seed(seed)
 
     # Setup model:
+    init_dtype_by_name = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    if training_args.model_init_dtype not in init_dtype_by_name:
+        raise ValueError(
+            f"Unsupported model_init_dtype={training_args.model_init_dtype!r}; "
+            f"choose one of {sorted(init_dtype_by_name)}."
+        )
+    previous_default_dtype = torch.get_default_dtype()
+    model_init_dtype = init_dtype_by_name[training_args.model_init_dtype]
+    torch.set_default_dtype(model_init_dtype)
+    logger.info("Constructing model parameters with dtype=%s.", model_init_dtype)
+
     if training_args.finetune_from_hf:
         llm_config = Qwen2Config.from_json_file(os.path.join(model_args.model_path, "llm_config.json"))
     else:
@@ -545,6 +570,7 @@ def main():
         model.language_model.resize_token_embeddings(len(tokenizer))
         model.config.llm_config.vocab_size = len(tokenizer)
         model.language_model.config.vocab_size = len(tokenizer)
+    torch.set_default_dtype(previous_default_dtype)
 
     # maybe freeze something:
     if training_args.freeze_vae and training_args.visual_gen:
