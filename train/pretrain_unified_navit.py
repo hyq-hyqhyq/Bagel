@@ -275,6 +275,15 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Whether finetune from HugginFace model."}
     )
+    sequential_checkpoint_load: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Load a full checkpoint one distributed rank at a time to avoid "
+                "multiplying the host-memory peak during FSDP startup."
+            )
+        },
+    )
 
     # --- reporting frequency ---
     log_every: int = field(
@@ -559,9 +568,27 @@ def main():
         num_shard=training_args.num_shard,
     )
     ema_model = deepcopy(model)
-    model, ema_model = FSDPCheckpoint.try_load_ckpt(
-        resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
-    )
+    checkpoint_exists = resume_from is not None and os.path.exists(resume_from)
+    if training_args.sequential_checkpoint_load and checkpoint_exists:
+        for loading_rank in range(dist.get_world_size()):
+            if dist.get_rank() == loading_rank:
+                logger.info(
+                    "Loading checkpoint on rank %s/%s to limit host-memory pressure.",
+                    loading_rank,
+                    dist.get_world_size(),
+                )
+                model, ema_model = FSDPCheckpoint.try_load_ckpt(
+                    resume_from,
+                    logger,
+                    model,
+                    ema_model,
+                    resume_from_ema=finetune_from_ema,
+                )
+            dist.barrier()
+    else:
+        model, ema_model = FSDPCheckpoint.try_load_ckpt(
+            resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
+        )
     ema_model = fsdp_ema_setup(ema_model, fsdp_config)
     fsdp_model = fsdp_wrapper(model, fsdp_config)
     apply_activation_checkpointing(
