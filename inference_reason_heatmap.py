@@ -30,6 +30,7 @@ def parse_args():
     )
     parser.add_argument("--metadata_path", default=None)
     parser.add_argument("--row_index", type=int, default=0)
+    parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument(
         "--sample_type",
         choices=("good", "bad", "pair"),
@@ -44,7 +45,10 @@ def parse_args():
     parser.add_argument("--timestep_shift", type=float, default=3.0)
     parser.add_argument("--cfg_text_scale", type=float, default=1.0)
     parser.add_argument("--cfg_img_scale", type=float, default=2.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.num_samples <= 0:
+        raise ValueError("num_samples must be positive.")
+    return args
 
 
 def build_model(model_path, checkpoint_path, device):

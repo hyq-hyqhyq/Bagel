@@ -9,7 +9,6 @@ import random
 import numpy as np
 import torch
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -190,6 +189,8 @@ def normalize_lora_state_dict(state_dict):
 
 
 def build_model(model_path, checkpoint_path, device):
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+
     model, vae_model = build_model_architecture(model_path)
 
     model = load_checkpoint_and_dispatch(
