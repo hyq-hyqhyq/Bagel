@@ -347,7 +347,8 @@ def run_inference(args, model_loader, metadata_extra=None):
                 timestep_shift=args.timestep_shift,
                 heatmap_only=args.heatmap_only,
             )
-            target = inferencer.vae_transform.resize_transform(target)
+            target_original = target.copy()
+            target_model = inferencer.vae_transform.resize_transform(target)
 
             sample_dir = os.path.join(
                 args.output_dir,
@@ -364,7 +365,8 @@ def run_inference(args, model_loader, metadata_extra=None):
                 threshold=args.binary_threshold,
             )
             binary_prediction.save(os.path.join(sample_dir, "prediction.png"))
-            target.save(os.path.join(sample_dir, "target.png"))
+            target_original.save(os.path.join(sample_dir, "target.png"))
+            target_model.save(os.path.join(sample_dir, "target_model.png"))
             for index, image in enumerate(images):
                 image.save(os.path.join(sample_dir, f"input_{index}.png"))
             if generated_reason is not None:
@@ -379,6 +381,9 @@ def run_inference(args, model_loader, metadata_extra=None):
                 "checkpoint_path": args.checkpoint_path,
                 "metadata_path": metadata_path,
                 "row_index": row_index,
+                "source_row_index": row.get("source_row_index"),
+                "sample_id": row.get("sample_id"),
+                "source_split": row.get("split"),
                 "sample_type": args.sample_type,
                 "image_paths": image_paths,
                 "prompt": prompt,
@@ -389,6 +394,10 @@ def run_inference(args, model_loader, metadata_extra=None):
                 "cfg_text_scale": args.cfg_text_scale,
                 "cfg_img_scale": args.cfg_img_scale,
                 "binary_threshold": args.binary_threshold,
+                "input_sizes": [list(image.size) for image in images],
+                "target_original_size": list(target_original.size),
+                "target_model_size": list(target_model.size),
+                "prediction_size": list(prediction.size),
             }
             if args.heatmap_only:
                 metadata.update(
