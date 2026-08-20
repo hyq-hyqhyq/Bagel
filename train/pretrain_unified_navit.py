@@ -424,12 +424,18 @@ class TrainingArguments:
     )
 
 
-def main():
+def main(
+    model_arguments=ModelArguments,
+    data_arguments=DataArguments,
+    training_arguments=TrainingArguments,
+):
     assert torch.cuda.is_available()
     dist.init_process_group("nccl")
     device = dist.get_rank() % torch.cuda.device_count()
     torch.cuda.set_device(device)
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
+    parser = HfArgumentParser(
+        (model_arguments, data_arguments, training_arguments)
+    )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     if training_args.peak_device_tflops <= 0:
         auto_tflops = detect_peak_tflops(training_args.peak_device_tflops)

@@ -25,10 +25,16 @@ from modeling.bagel import (
     SiglipVisionModel,
 )
 from modeling.qwen2 import Qwen2Tokenizer
+from sanity_patch.mask_utils import to_binary_mask
+from sanity_patch.settings import (
+    BINARY_MASK_THRESHOLD,
+    SANITY_PATCH_PROMPT,
+    TIMESTEP_SHIFT,
+)
 
 
-SINGLE_IMAGE_PROMPT = "Analyze the perspective and projection realism of this image."
-PAIR_PROMPT = "Compare the two images and explain the perspective and projection realism difference."
+SINGLE_IMAGE_PROMPT = SANITY_PATCH_PROMPT
+PAIR_PROMPT = SANITY_PATCH_PROMPT
 LORA_VARIANTS = {
     "normal": {
         "checkpoint_path": (
@@ -93,7 +99,7 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_timesteps", type=int, default=50)
-    parser.add_argument("--timestep_shift", type=float, default=3.0)
+    parser.add_argument("--timestep_shift", type=float, default=TIMESTEP_SHIFT)
     parser.add_argument("--cfg_text_scale", type=float, default=4.0)
     parser.add_argument("--cfg_img_scale", type=float, default=2.0)
     parser.add_argument(
@@ -101,12 +107,20 @@ def parse_args():
         default="",
         help="Optional instruction appended to the dataset prompt.",
     )
+    parser.add_argument(
+        "--binary_threshold",
+        type=int,
+        default=BINARY_MASK_THRESHOLD,
+        help="Grayscale threshold used to save prediction.png as a binary mask.",
+    )
     args = parser.parse_args()
     variant = LORA_VARIANTS[args.lora_variant]
     args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
     args.output_dir = args.output_dir or variant["output_dir"]
     if args.num_samples <= 0:
         raise ValueError("num_samples must be positive.")
+    if not 0 <= args.binary_threshold <= 255:
+        raise ValueError("binary_threshold must be between 0 and 255.")
     return args
 
 
@@ -315,7 +329,16 @@ def run_inference(args, model_loader, metadata_extra=None):
                 f"{checkpoint_name}_row{row_index:04d}_{args.sample_type}",
             )
             os.makedirs(sample_dir, exist_ok=True)
-            prediction.save(os.path.join(sample_dir, "prediction.png"))
+            prediction.save(os.path.join(sample_dir, "prediction_raw.png"))
+            prediction = prediction.resize(
+                images[-1].size,
+                resample=Image.Resampling.NEAREST,
+            )
+            binary_prediction = to_binary_mask(
+                prediction,
+                threshold=args.binary_threshold,
+            )
+            binary_prediction.save(os.path.join(sample_dir, "prediction.png"))
             target.save(os.path.join(sample_dir, "target.png"))
             for index, image in enumerate(images):
                 image.save(os.path.join(sample_dir, f"input_{index}.png"))
@@ -335,6 +358,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                 "timestep_shift": args.timestep_shift,
                 "cfg_text_scale": args.cfg_text_scale,
                 "cfg_img_scale": args.cfg_img_scale,
+                "binary_threshold": args.binary_threshold,
             }
             if metadata_extra:
                 metadata.update(metadata_extra)

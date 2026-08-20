@@ -6,6 +6,8 @@ import os
 
 from PIL import Image, ImageFile, PngImagePlugin
 
+from sanity_patch.settings import SANITY_PATCH_PROMPT
+
 from .interleave_t2i_dataset import InterleavedBaseIterableDataset
 from ..data_utils import pil_img2rgb
 
@@ -15,13 +17,6 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 MaximumDecompressedSize = 1024
 MegaByte = 2 ** 20
 PngImagePlugin.MAX_TEXT_CHUNK = MaximumDecompressedSize * MegaByte
-
-SANITY_PATCH_PROMPT = (
-    "Detect the artificial rectangular patch and output a binary heatmap: "
-    "white for the patch and black for the background. If no patch is present, "
-    "output an all-black heatmap."
-)
-
 
 class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
 

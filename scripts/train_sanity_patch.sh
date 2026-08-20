@@ -17,49 +17,13 @@ wandb_name=${wandb_name:-sanity_patch_full_8gpu}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-True}
 total_steps=${total_steps:-10000}
-wait_interval=${wait_interval:-60}
 
-completion_file="$data_path/metadata/dataset_info.json"
-
-data_ready() {
-  python - "$completion_file" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    with path.open("r", encoding="utf-8") as f:
-        counts = json.load(f)["counts"]
-except (FileNotFoundError, KeyError, json.JSONDecodeError):
-    raise SystemExit(1)
-
-expected = {"train": 4000, "val": 202, "test": 200}
-raise SystemExit(0 if counts == expected else 1)
-PY
+test -s "$data_path/metadata/train.jsonl" || {
+  echo "Missing training metadata: $data_path/metadata/train.jsonl" >&2
+  exit 1
 }
 
-count_files() {
-  local directory=$1
-  if [[ -d "$directory" ]]; then
-    find "$directory" -type f -size +0c | wc -l
-  else
-    echo 0
-  fi
-}
-
-while ! data_ready; do
-  train_count=$(count_files "$data_path/heatmaps/train")
-  val_count=$(count_files "$data_path/heatmaps/val")
-  test_count=$(count_files "$data_path/heatmaps/test")
-  printf '[%s] Waiting for data: train=%s/4000 val=%s/202 test=%s/200\n' \
-    "$(date '+%F %T')" "$train_count" "$val_count" "$test_count"
-  sleep "$wait_interval"
-done
-
-python sanity_patch/prepare_training_metadata.py --data-root "$data_path"
-
-export BAGEL_REASON_HEATMAP_DATA_DIR="$data_path"
+export BAGEL_SANITY_PATCH_DATA_DIR="$data_path"
 mkdir -p "$output_path" "$ckpt_path"
 
 torchrun \
@@ -69,7 +33,7 @@ torchrun \
   --master_addr="$master_addr" \
   --master_port="$master_port" \
   train/finetune_reason_heatmap.py \
-  --dataset_config_file ./data/configs/reason_heatmap.yaml \
+  --dataset_config_file ./data/configs/sanity_patch.yaml \
   --model_path "$model_path" \
   --layer_module Qwen2MoTDecoderLayer \
   --max_latent_size 64 \
@@ -84,9 +48,10 @@ torchrun \
   --freeze_vit False \
   --freeze_llm False \
   --freeze_und False \
-  --text_cond_dropout_prob 0.0 \
-  --vae_cond_dropout_prob 0.0 \
-  --vit_cond_dropout_prob 0.0 \
+  --text_cond_dropout_prob 0.05 \
+  --vae_cond_dropout_prob 0.1 \
+  --vit_cond_dropout_prob 0.1 \
+  --timestep_shift 4.0 \
   --ce_weight 1.0 \
   --mse_weight 1.0 \
   --use_flex True \
