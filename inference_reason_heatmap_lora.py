@@ -96,6 +96,11 @@ def parse_args():
     parser.add_argument("--timestep_shift", type=float, default=3.0)
     parser.add_argument("--cfg_text_scale", type=float, default=4.0)
     parser.add_argument("--cfg_img_scale", type=float, default=2.0)
+    parser.add_argument(
+        "--prompt_suffix",
+        default="",
+        help="Optional instruction appended to the dataset prompt.",
+    )
     args = parser.parse_args()
     variant = LORA_VARIANTS[args.lora_variant]
     args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
@@ -291,6 +296,9 @@ def run_inference(args, model_loader, metadata_extra=None):
             images, image_paths, prompt, target_reason, target = prepare_sample(
                 row, args.data_dir, args.sample_type
             )
+            prompt_suffix = args.prompt_suffix.strip()
+            if prompt_suffix:
+                prompt = f"{prompt} {prompt_suffix}"
             generated_reason, prediction = generate_reason_heatmap(
                 inferencer=inferencer,
                 images=images,
