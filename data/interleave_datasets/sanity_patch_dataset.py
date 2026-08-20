@@ -1,0 +1,136 @@
+# Copyright 2025 Bytedance Ltd. and/or its affiliates.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import os
+
+from PIL import Image, ImageFile, PngImagePlugin
+
+from .interleave_t2i_dataset import InterleavedBaseIterableDataset
+from ..data_utils import pil_img2rgb
+
+
+Image.MAX_IMAGE_PIXELS = 200000000
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+MaximumDecompressedSize = 1024
+MegaByte = 2 ** 20
+PngImagePlugin.MAX_TEXT_CHUNK = MaximumDecompressedSize * MegaByte
+
+SANITY_PATCH_PROMPT = (
+    "Detect the artificial rectangular patch and output a binary heatmap: "
+    "white for the patch and black for the background. If no patch is present, "
+    "output an all-black heatmap."
+)
+
+
+class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
+
+    def __init__(
+        self,
+        dataset_name,
+        transform,
+        tokenizer,
+        vit_transform,
+        jsonl_path_list,
+        data_dir_list,
+        num_used_data,
+        local_rank=0,
+        world_size=1,
+        num_workers=8,
+        data_status=None,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            local_rank=local_rank,
+            world_size=world_size,
+            num_workers=num_workers,
+        )
+        self.transform = transform
+        self.tokenizer = tokenizer
+        self.vit_transform = vit_transform
+        self.data_status = data_status
+        self.data_paths = self.get_data_paths(
+            jsonl_path_list, data_dir_list, num_used_data
+        )
+        self.set_epoch()
+
+    def get_data_paths(self, jsonl_path_list, data_dir_list, num_used_data):
+        data_paths = []
+        for jsonl_path, data_dir, num_data_point in zip(
+            jsonl_path_list, data_dir_list, num_used_data
+        ):
+            with open(jsonl_path, "r") as f:
+                for row_idx, line in enumerate(f):
+                    if row_idx >= num_data_point:
+                        break
+                    data_paths.append((row_idx, data_dir, line))
+        return data_paths
+
+    @staticmethod
+    def _read_image(image_path):
+        return pil_img2rgb(Image.open(image_path))
+
+    def parse_row(self, row, data_dir):
+        good_image = self._read_image(os.path.join(data_dir, row["good_image"]))
+        bad_image = self._read_image(os.path.join(data_dir, row["bad_image"]))
+        bad_heatmap = self._read_image(os.path.join(data_dir, row["bad_heatmap"]))
+        black_heatmap = Image.new("RGB", good_image.size)
+
+        samples = []
+        for input_images, reason, heatmap in [
+            ([good_image], row["good_reason"], black_heatmap),
+            ([bad_image], row["bad_reason"], bad_heatmap),
+            ([good_image, bad_image], row["pair_reason"], bad_heatmap),
+        ]:
+            data = self._init_data()
+            for input_image in input_images:
+                data = self._add_image(
+                    data,
+                    input_image,
+                    need_loss=False,
+                    need_vae=True,
+                    need_vit=True,
+                )
+            data = self._add_text(data, SANITY_PATCH_PROMPT, need_loss=False)
+            data = self._add_text(
+                data,
+                f"<think>{reason}</think>",
+                need_loss=True,
+                enable_cfg=False,
+            )
+            data = self._add_image(
+                data,
+                heatmap,
+                need_loss=True,
+                need_vae=False,
+                need_vit=False,
+            )
+            samples.append(data)
+        return samples
+
+    def __iter__(self):
+        data_paths_per_worker, worker_id = self.get_data_paths_per_worker()
+        if self.data_status is not None:
+            row_start_id = self.data_status[worker_id]["data_indexes"] + 1
+        else:
+            row_start_id = 0
+
+        print(
+            f"rank-{self.local_rank} worker-{worker_id} dataset-{self.dataset_name}: "
+            f"resuming data at row#{row_start_id}"
+        )
+
+        while True:
+            for row_idx, data_dir, line in data_paths_per_worker[row_start_id:]:
+                try:
+                    samples = self.parse_row(json.loads(line), data_dir)
+                    for data in samples:
+                        data["data_indexes"] = {
+                            "data_indexes": row_idx,
+                            "worker_id": worker_id,
+                            "dataset_name": self.dataset_name,
+                        }
+                        yield data
+                except Exception as e:
+                    print(f"Error {e} at row#{row_idx}")
+                    continue
