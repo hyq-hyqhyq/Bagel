@@ -164,19 +164,42 @@ class Bagel(PreTrainedModel):
             attention_mask = nested_attention_masks
 
         if self.config.visual_und:
-            cu_seqlens = torch.nn.functional.pad(torch.cumsum(vit_token_seqlens, dim=0), (1, 0))
-            cu_seqlens = cu_seqlens.to(torch.int32)
-            max_seqlen = torch.max(vit_token_seqlens).item()
-            packed_vit_token_embed = self.vit_model(
-                packed_pixel_values=packed_vit_tokens, 
-                packed_flattened_position_ids=packed_vit_position_ids,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
-            packed_vit_token_embed = self.connector(packed_vit_token_embed)
-            vit_token_pos_emb = self.vit_pos_embed(packed_vit_position_ids)
-            packed_vit_token_embed = packed_vit_token_embed + vit_token_pos_emb
-            packed_sequence[packed_vit_token_indexes] = packed_vit_token_embed
+            if vit_token_seqlens is not None and len(vit_token_seqlens) > 0:
+                cu_seqlens = torch.nn.functional.pad(
+                    torch.cumsum(vit_token_seqlens, dim=0), (1, 0)
+                )
+                cu_seqlens = cu_seqlens.to(torch.int32)
+                max_seqlen = torch.max(vit_token_seqlens).item()
+                packed_vit_token_embed = self.vit_model(
+                    packed_pixel_values=packed_vit_tokens,
+                    packed_flattened_position_ids=packed_vit_position_ids,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+                packed_vit_token_embed = self.connector(packed_vit_token_embed)
+                vit_token_pos_emb = self.vit_pos_embed(packed_vit_position_ids)
+                packed_vit_token_embed = packed_vit_token_embed + vit_token_pos_emb
+                packed_sequence[packed_vit_token_indexes] = packed_vit_token_embed
+            else:
+                dtype = packed_text_embedding.dtype
+                device = packed_text_embedding.device
+                patch_dim = self.vit_patch_size * self.vit_patch_size * 3
+                dummy_vit_tokens = torch.zeros(
+                    (1, patch_dim), dtype=dtype, device=device
+                )
+                dummy_pos_ids = torch.zeros((1,), dtype=torch.long, device=device)
+                dummy_cu_seqlens = torch.tensor(
+                    [0, 1], dtype=torch.int32, device=device
+                )
+                dummy_out = self.vit_model(
+                    packed_pixel_values=dummy_vit_tokens,
+                    packed_flattened_position_ids=dummy_pos_ids,
+                    cu_seqlens=dummy_cu_seqlens,
+                    max_seqlen=1,
+                )
+                dummy_out = self.connector(dummy_out)
+                dummy_out = dummy_out + self.vit_pos_embed(dummy_pos_ids)
+                packed_sequence = packed_sequence + dummy_out.sum() * 0
 
         if self.config.visual_gen:
             p = self.latent_patch_size
