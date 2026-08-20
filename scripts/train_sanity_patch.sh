@@ -17,6 +17,7 @@ wandb_name=${wandb_name:-sanity_patch_full_8gpu}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-True}
 total_steps=${total_steps:-10000}
+dataset_config_file=${dataset_config_file:-./data/configs/sanity_patch.yaml}
 
 test -s "$data_path/metadata/train.jsonl" || {
   echo "Missing training metadata: $data_path/metadata/train.jsonl" >&2
@@ -33,7 +34,7 @@ torchrun \
   --master_addr="$master_addr" \
   --master_port="$master_port" \
   train/finetune_reason_heatmap.py \
-  --dataset_config_file ./data/configs/sanity_patch.yaml \
+  --dataset_config_file "$dataset_config_file" \
   --model_path "$model_path" \
   --layer_module Qwen2MoTDecoderLayer \
   --max_latent_size 64 \

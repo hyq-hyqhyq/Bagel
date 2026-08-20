@@ -33,6 +33,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
         world_size=1,
         num_workers=8,
         data_status=None,
+        heatmap_only=False,
     ):
         super().__init__(
             dataset_name=dataset_name,
@@ -44,6 +45,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
         self.tokenizer = tokenizer
         self.vit_transform = vit_transform
         self.data_status = data_status
+        self.heatmap_only = heatmap_only
         self.data_paths = self.get_data_paths(
             jsonl_path_list, data_dir_list, num_used_data
         )
@@ -87,12 +89,13 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     need_vit=True,
                 )
             data = self._add_text(data, SANITY_PATCH_PROMPT, need_loss=False)
-            data = self._add_text(
-                data,
-                f"<think>{reason}</think>",
-                need_loss=True,
-                enable_cfg=False,
-            )
+            if not self.heatmap_only:
+                data = self._add_text(
+                    data,
+                    f"<think>{reason}</think>",
+                    need_loss=True,
+                    enable_cfg=False,
+                )
             data = self._add_image(
                 data,
                 heatmap,

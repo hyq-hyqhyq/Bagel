@@ -28,6 +28,11 @@ from modeling.qwen2 import Qwen2Tokenizer
 from sanity_patch.mask_utils import to_binary_mask
 from sanity_patch.settings import (
     BINARY_MASK_THRESHOLD,
+    DENSE_CFG_IMG_SCALE,
+    DENSE_CFG_INTERVAL,
+    DENSE_CFG_RENORM_MIN,
+    DENSE_CFG_RENORM_TYPE,
+    DENSE_CFG_TEXT_SCALE,
     SANITY_PATCH_PROMPT,
     TIMESTEP_SHIFT,
 )
@@ -100,12 +105,17 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=TIMESTEP_SHIFT)
-    parser.add_argument("--cfg_text_scale", type=float, default=4.0)
-    parser.add_argument("--cfg_img_scale", type=float, default=2.0)
+    parser.add_argument("--cfg_text_scale", type=float, default=None)
+    parser.add_argument("--cfg_img_scale", type=float, default=None)
     parser.add_argument(
         "--prompt_suffix",
         default="",
         help="Optional instruction appended to the dataset prompt.",
+    )
+    parser.add_argument(
+        "--heatmap_only",
+        action="store_true",
+        help="Skip explanation generation and generate only the heatmap.",
     )
     parser.add_argument(
         "--binary_threshold",
@@ -117,6 +127,10 @@ def parse_args():
     variant = LORA_VARIANTS[args.lora_variant]
     args.checkpoint_path = args.checkpoint_path or variant["checkpoint_path"]
     args.output_dir = args.output_dir or variant["output_dir"]
+    if args.cfg_text_scale is None:
+        args.cfg_text_scale = DENSE_CFG_TEXT_SCALE if args.heatmap_only else 4.0
+    if args.cfg_img_scale is None:
+        args.cfg_img_scale = DENSE_CFG_IMG_SCALE if args.heatmap_only else 2.0
     if args.num_samples <= 0:
         raise ValueError("num_samples must be positive.")
     if not 0 <= args.binary_threshold <= 255:
@@ -258,16 +272,26 @@ def generate_reason_heatmap(
     cfg_img_scale,
     num_timesteps,
     timestep_shift,
+    heatmap_only=False,
 ):
+    dense_kwargs = {}
+    if heatmap_only:
+        dense_kwargs = {
+            "cfg_interval": DENSE_CFG_INTERVAL,
+            "cfg_renorm_min": DENSE_CFG_RENORM_MIN,
+            "cfg_renorm_type": DENSE_CFG_RENORM_TYPE,
+        }
     outputs = inferencer.interleave_inference(
         [*images, prompt],
-        think=True,
+        think=not heatmap_only,
         cfg_text_scale=cfg_text_scale,
         cfg_img_scale=cfg_img_scale,
         timestep_shift=timestep_shift,
         num_timesteps=num_timesteps,
+        **dense_kwargs,
     )
-    return outputs[0], outputs[-1]
+    generated_reason = None if heatmap_only else outputs[0]
+    return generated_reason, outputs[-1]
 
 
 def run_inference(args, model_loader, metadata_extra=None):
@@ -321,6 +345,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                 cfg_img_scale=args.cfg_img_scale,
                 num_timesteps=args.num_timesteps,
                 timestep_shift=args.timestep_shift,
+                heatmap_only=args.heatmap_only,
             )
             target = inferencer.vae_transform.resize_transform(target)
 
@@ -342,8 +367,13 @@ def run_inference(args, model_loader, metadata_extra=None):
             target.save(os.path.join(sample_dir, "target.png"))
             for index, image in enumerate(images):
                 image.save(os.path.join(sample_dir, f"input_{index}.png"))
-            with open(os.path.join(sample_dir, "reason.txt"), "w", encoding="utf-8") as f:
-                f.write(generated_reason)
+            if generated_reason is not None:
+                with open(
+                    os.path.join(sample_dir, "reason.txt"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    f.write(generated_reason)
 
             metadata = {
                 "checkpoint_path": args.checkpoint_path,
@@ -352,7 +382,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                 "sample_type": args.sample_type,
                 "image_paths": image_paths,
                 "prompt": prompt,
-                "target_reason": target_reason,
+                "heatmap_only": args.heatmap_only,
                 "seed": args.seed,
                 "num_timesteps": args.num_timesteps,
                 "timestep_shift": args.timestep_shift,
@@ -360,6 +390,14 @@ def run_inference(args, model_loader, metadata_extra=None):
                 "cfg_img_scale": args.cfg_img_scale,
                 "binary_threshold": args.binary_threshold,
             }
+            if args.heatmap_only:
+                metadata.update(
+                    cfg_interval=list(DENSE_CFG_INTERVAL),
+                    cfg_renorm_min=DENSE_CFG_RENORM_MIN,
+                    cfg_renorm_type=DENSE_CFG_RENORM_TYPE,
+                )
+            if not args.heatmap_only:
+                metadata["target_reason"] = target_reason
             if metadata_extra:
                 metadata.update(metadata_extra)
             with open(

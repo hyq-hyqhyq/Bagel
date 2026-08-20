@@ -7,7 +7,12 @@ import torch
 from accelerate import load_checkpoint_and_dispatch
 
 from inference_reason_heatmap_lora import build_model_architecture, run_inference
-from sanity_patch.settings import BINARY_MASK_THRESHOLD, TIMESTEP_SHIFT
+from sanity_patch.settings import (
+    BINARY_MASK_THRESHOLD,
+    DENSE_CFG_IMG_SCALE,
+    DENSE_CFG_TEXT_SCALE,
+    TIMESTEP_SHIFT,
+)
 
 
 def parse_args():
@@ -44,12 +49,17 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_timesteps", type=int, default=50)
     parser.add_argument("--timestep_shift", type=float, default=TIMESTEP_SHIFT)
-    parser.add_argument("--cfg_text_scale", type=float, default=1.0)
-    parser.add_argument("--cfg_img_scale", type=float, default=2.0)
+    parser.add_argument("--cfg_text_scale", type=float, default=None)
+    parser.add_argument("--cfg_img_scale", type=float, default=None)
     parser.add_argument(
         "--prompt_suffix",
         default="",
         help="Optional instruction appended to the dataset prompt.",
+    )
+    parser.add_argument(
+        "--heatmap_only",
+        action="store_true",
+        help="Skip explanation generation and generate only the heatmap.",
     )
     parser.add_argument(
         "--binary_threshold",
@@ -58,6 +68,10 @@ def parse_args():
         help="Grayscale threshold used to save prediction.png as a binary mask.",
     )
     args = parser.parse_args()
+    if args.cfg_text_scale is None:
+        args.cfg_text_scale = DENSE_CFG_TEXT_SCALE if args.heatmap_only else 1.0
+    if args.cfg_img_scale is None:
+        args.cfg_img_scale = DENSE_CFG_IMG_SCALE if args.heatmap_only else 2.0
     if args.num_samples <= 0:
         raise ValueError("num_samples must be positive.")
     if not 0 <= args.binary_threshold <= 255:

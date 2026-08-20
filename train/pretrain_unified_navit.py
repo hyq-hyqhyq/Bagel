@@ -753,33 +753,49 @@ def main(
         
         loss = 0
         ce = loss_dict["ce"]
-        if ce is not None:
-            total_ce_tokens = torch.tensor(len(data['ce_loss_indexes']), device=device)
+        ce_group_size = torch.tensor(int(loss_dict.pop("has_ce")), device=device)
+        dist.all_reduce(ce_group_size, op=dist.ReduceOp.SUM)
+        if ce_group_size.item() > 0:
+            total_ce_tokens = torch.tensor(
+                len(data.get('ce_loss_indexes', [])), device=device
+            )
             dist.all_reduce(total_ce_tokens, op=dist.ReduceOp.SUM)
-            if training_args.ce_loss_reweighting:
+            if training_args.ce_loss_reweighting and ce_loss_weights is not None:
                 ce = ce * ce_loss_weights
                 total_ce_loss_weights = ce_loss_weights.sum()
                 dist.all_reduce(total_ce_loss_weights, op=dist.ReduceOp.SUM)
-                ce = ce.sum() * dist.get_world_size() / total_ce_loss_weights
+                ce = ce.sum() * ce_group_size.item() / total_ce_loss_weights
             else:
-                ce = ce.sum() * dist.get_world_size() / total_ce_tokens
+                ce = ce.sum() * ce_group_size.item() / total_ce_tokens
             loss_dict["ce"] = ce.detach()
             loss = loss + ce * training_args.ce_weight
         else:
-            assert not training_args.visual_und
-            loss_dict["ce"] = torch.tensor(0, device=device)
+            loss_dict["ce"] = torch.tensor(0.0, device=device)
             total_ce_tokens = torch.tensor(0, device=device)
 
         if training_args.visual_gen:
             mse = loss_dict["mse"]
-            total_mse_tokens = torch.tensor(len(data['mse_loss_indexes']), device=device)
-            dist.all_reduce(total_mse_tokens, op=dist.ReduceOp.SUM)
-            mse = mse.mean(dim=-1).sum() * dist.get_world_size() / total_mse_tokens
-            loss_dict["mse"] = mse.detach()
-            loss = loss + mse * training_args.mse_weight
+            mse_group_size = torch.tensor(int(loss_dict.pop("has_mse")), device=device)
+            dist.all_reduce(mse_group_size, op=dist.ReduceOp.SUM)
+            if mse_group_size.item() > 0:
+                total_mse_tokens = torch.tensor(
+                    len(data.get('mse_loss_indexes', [])), device=device
+                )
+                dist.all_reduce(total_mse_tokens, op=dist.ReduceOp.SUM)
+                mse = (
+                    mse.mean(dim=-1).sum()
+                    * mse_group_size.item()
+                    / total_mse_tokens
+                )
+                loss_dict["mse"] = mse.detach()
+                loss = loss + mse * training_args.mse_weight
+            else:
+                loss_dict["mse"] = torch.tensor(0.0, device=device)
+                total_mse_tokens = torch.tensor(0, device=device)
         else:
             assert not training_args.visual_gen
-            loss_dict["mse"] = torch.tensor(0, device=device)
+            loss_dict.pop("has_mse", None)
+            loss_dict["mse"] = torch.tensor(0.0, device=device)
             total_mse_tokens = torch.tensor(0, device=device)
 
         loss = loss / training_args.gradient_accumulation_steps
