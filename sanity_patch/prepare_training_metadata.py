@@ -5,6 +5,8 @@ import argparse
 import json
 from pathlib import Path
 
+from PIL import Image, ImageStat
+
 
 SPLITS = ("train", "val", "test")
 GOOD_REASON = "No synthetic rectangular patch corruption is present in this image."
@@ -20,6 +22,8 @@ def parse_args():
     )
     parser.add_argument("--data-root", type=Path, default=Path("sanity_patch_data"))
     parser.add_argument("--splits", nargs="+", choices=SPLITS, default=list(SPLITS))
+    parser.add_argument("--train-size", type=int, default=3960)
+    parser.add_argument("--test-size", type=int, default=40)
     return parser.parse_args()
 
 
@@ -28,7 +32,17 @@ def resolve_data_path(data_root, value):
     return path if path.is_absolute() else data_root / path
 
 
-def enrich_record(record):
+def image_black_ratio(image):
+    mean_gray = ImageStat.Stat(image.convert("L")).mean[0]
+    return max(0.0, min(1.0, 1.0 - mean_gray / 255.0))
+
+
+def heatmap_black_ratio(path):
+    with Image.open(path) as image:
+        return image_black_ratio(image)
+
+
+def enrich_record(record, data_root):
     required_fields = (
         "source_image_path",
         "corrupted_image_path",
@@ -41,6 +55,11 @@ def enrich_record(record):
     if missing:
         raise KeyError(f"Missing fields {missing} in sample {record.get('sample_id')}")
 
+    heatmap_path = resolve_data_path(data_root, record["heatmap_path"])
+    if not heatmap_path.is_file():
+        raise FileNotFoundError(f"Missing heatmap for sample {record.get('sample_id')}: {heatmap_path}")
+    bad_score = heatmap_black_ratio(heatmap_path)
+
     record.update(
         {
             "good_image": record["source_image_path"],
@@ -52,9 +71,20 @@ def enrich_record(record):
                 color=record["color_name"],
                 region=record["region_name"],
             ),
+            "good_score": 1.0,
+            "bad_score": bad_score,
+            "pair_score": bad_score,
         }
     )
     return record
+
+
+def write_jsonl(path, records):
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporary_path.replace(path)
 
 
 def prepare_split(data_root, split):
@@ -67,7 +97,7 @@ def prepare_split(data_root, split):
         for line_number, line in enumerate(f, start=1):
             if not line.strip():
                 continue
-            record = enrich_record(json.loads(line))
+            record = enrich_record(json.loads(line), data_root)
             for field in ("good_image", "bad_image", "bad_heatmap"):
                 path = resolve_data_path(data_root, record[field])
                 if not path.is_file():
@@ -76,19 +106,69 @@ def prepare_split(data_root, split):
                     )
             records.append(record)
 
-    temporary_path = metadata_path.with_suffix(".jsonl.tmp")
-    with temporary_path.open("w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    temporary_path.replace(metadata_path)
+    write_jsonl(metadata_path, records)
     print(f"Prepared {len(records)} {split} records.")
-    return len(records)
+    return records
+
+
+def split_train_test_records(records, train_size, test_size):
+    if train_size <= 0 or test_size <= 0:
+        raise ValueError("Train and test sizes must both be positive.")
+
+    expected_size = train_size + test_size
+    if len(records) != expected_size:
+        raise ValueError(
+            f"Expected {expected_size} source train records for a "
+            f"{train_size}/{test_size} split, got {len(records)}."
+        )
+
+    train_records = [
+        {**record, "score_split": "train", "score_split_index": index}
+        for index, record in enumerate(records[:train_size])
+    ]
+    test_records = [
+        {**record, "score_split": "test", "score_split_index": index}
+        for index, record in enumerate(records[train_size:])
+    ]
+    return train_records, test_records
+
+
+def prepare_train_test_split(data_root, records, train_size, test_size):
+    train_records, test_records = split_train_test_records(
+        records,
+        train_size,
+        test_size,
+    )
+    train_path = data_root / "metadata" / f"train_{train_size}.jsonl"
+    test_path = data_root / "metadata" / f"test_last{test_size}.jsonl"
+    write_jsonl(train_path, train_records)
+    write_jsonl(test_path, test_records)
+    print(f"Prepared score split: {len(train_records)} train, {len(test_records)} test.")
+    return train_path, test_path
 
 
 def main():
     args = parse_args()
     data_root = args.data_root.resolve()
-    counts = {split: prepare_split(data_root, split) for split in args.splits}
+    records_by_split = {
+        split: prepare_split(data_root, split) for split in args.splits
+    }
+    counts = {split: len(records) for split, records in records_by_split.items()}
+
+    score_split = None
+    if "train" in records_by_split:
+        train_path, test_path = prepare_train_test_split(
+            data_root,
+            records_by_split["train"],
+            args.train_size,
+            args.test_size,
+        )
+        score_split = {
+            "train_size": args.train_size,
+            "test_size": args.test_size,
+            "train_metadata": train_path.relative_to(data_root).as_posix(),
+            "test_metadata": test_path.relative_to(data_root).as_posix(),
+        }
 
     info_path = data_root / "metadata" / "dataset_info.json"
     if set(args.splits) == set(SPLITS) and info_path.is_file():
@@ -99,6 +179,8 @@ def main():
                 "good_reason": GOOD_REASON,
                 "pair_explanation_template": PAIR_EXPLANATION_TEMPLATE,
                 "reason_heatmap_compatible": True,
+                "score_formula": "1 - mean(grayscale_heatmap) / 255",
+                "score_split": score_split,
                 "counts": counts,
             }
         )

@@ -73,24 +73,27 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
         black_heatmap = Image.new("RGB", good_image.size)
 
         samples = []
-        for input_images, prompt, reason, heatmap in [
+        for input_images, prompt, reason, heatmap, score_label in [
             (
                 [good_image],
                 "Analyze the perspective and projection realism of this image.",
                 row["good_reason"],
                 black_heatmap,
+                row.get("good_score", 1.0),
             ),
             (
                 [bad_image],
                 "Analyze the perspective and projection realism of this image.",
                 row["bad_reason"],
                 bad_heatmap,
+                row.get("bad_score", 0.0),
             ),
             (
                 [good_image, bad_image],
                 "Compare the two images and explain the perspective and projection realism difference.",
                 row["pair_reason"],
                 bad_heatmap,
+                row.get("pair_score"),
             ),
         ]:
             data = self._init_data()
@@ -117,6 +120,8 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
                 need_vae=False,
                 need_vit=False,
             )
+            if score_label is not None:
+                data["score_label"] = float(score_label)
             samples.append(data)
         return samples
 

@@ -11,9 +11,9 @@ master_addr=${master_addr:-127.0.0.1}
 master_port=${master_port:-29500}
 model_path=${model_path:-/data/bagel/repo/agent/bpipe/models/BAGEL-7B-MoT}
 data_path=${BAGEL_SANITY_PATCH_DATA_DIR:-/data/bagel/repo/Bagel/sanity_patch_data}
-output_path=${output_path:-results/sanity_patch_full_8gpu}
+output_path=${output_path:-results/sanity_patch_full_8gpu_score}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
-wandb_name=${wandb_name:-sanity_patch_full_8gpu}
+wandb_name=${wandb_name:-sanity_patch_full_8gpu_score}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-True}
 total_steps=${total_steps:-10000}
@@ -24,7 +24,13 @@ test -s "$data_path/metadata/train.jsonl" || {
   exit 1
 }
 
+python sanity_patch/prepare_training_metadata.py \
+  --data-root "$data_path" \
+  --train-size 3960 \
+  --test-size 40
+
 export BAGEL_SANITY_PATCH_DATA_DIR="$data_path"
+export BAGEL_SANITY_PATCH_METADATA_PATH="$data_path/metadata/train_3960.jsonl"
 mkdir -p "$output_path" "$ckpt_path"
 
 torchrun \
@@ -45,6 +51,8 @@ torchrun \
   --auto_resume True \
   --visual_gen True \
   --visual_und True \
+  --score_head True \
+  --score_weight 1.0 \
   --freeze_vae True \
   --freeze_vit False \
   --freeze_llm False \

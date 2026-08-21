@@ -38,6 +38,8 @@ class BagelConfig(PretrainedConfig):
         connector_act="gelu_pytorch_tanh",
         interpolate_pos=False,
         timestep_shift=1.0,
+        score_head=False,
+        score_head_hidden_size=256,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -52,6 +54,8 @@ class BagelConfig(PretrainedConfig):
         self.connector_act = connector_act
         self.interpolate_pos = interpolate_pos
         self.timestep_shift = timestep_shift
+        self.score_head = score_head
+        self.score_head_hidden_size = score_head_hidden_size
 
 
 class Bagel(PreTrainedModel):
@@ -85,6 +89,14 @@ class Bagel(PreTrainedModel):
             self.connector = MLPconnector(self.vit_hidden_size, self.hidden_size, config.connector_act)
             self.vit_pos_embed = PositionEmbedding(self.vit_max_num_patch_per_side, self.hidden_size)
 
+        if config.score_head:
+            self.score_head = nn.Sequential(
+                nn.LayerNorm(self.hidden_size * 3),
+                nn.Linear(self.hidden_size * 3, config.score_head_hidden_size),
+                nn.SiLU(),
+                nn.Linear(config.score_head_hidden_size, 1),
+            )
+
         if config.interpolate_pos:
             self.get_flattened_position_ids = get_flattened_position_ids_interpolate
         else:
@@ -97,6 +109,18 @@ class Bagel(PreTrainedModel):
         if self.config.visual_gen:
             nn.init.constant_(self.llm2vae.weight, 0)
             nn.init.constant_(self.llm2vae.bias, 0)
+
+    @staticmethod
+    def _scatter_mean(hidden_states, token_indexes, sample_ids, num_samples):
+        pooled = hidden_states.new_zeros((num_samples, hidden_states.shape[-1]))
+        pooled = pooled.index_add(0, sample_ids, hidden_states[token_indexes])
+        counts = hidden_states.new_zeros(num_samples)
+        counts = counts.index_add(
+            0,
+            sample_ids,
+            hidden_states.new_ones(sample_ids.shape[0]),
+        )
+        return pooled / counts.clamp_min(1).unsqueeze(-1)
 
     def forward(
         self,
@@ -122,6 +146,13 @@ class Bagel(PreTrainedModel):
         packed_vae_token_indexes: Optional[torch.LongTensor] = None,
         packed_timesteps: Optional[torch.LongTensor] = None,
         mse_loss_indexes: Optional[torch.BoolTensor] = None,
+        # for score regression
+        score_token_indexes: Optional[torch.LongTensor] = None,
+        score_labels: Optional[torch.Tensor] = None,
+        score_vae_token_indexes: Optional[torch.LongTensor] = None,
+        score_vae_sample_ids: Optional[torch.LongTensor] = None,
+        score_vit_token_indexes: Optional[torch.LongTensor] = None,
+        score_vit_sample_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -237,6 +268,36 @@ class Bagel(PreTrainedModel):
             **extra_inputs,
         )
 
+        score_mse = None
+        score_preds = None
+        if self.config.score_head:
+            if score_token_indexes is None:
+                score_hidden = last_hidden_state.new_zeros((0, self.hidden_size * 3))
+            else:
+                num_score_samples = score_token_indexes.shape[0]
+                score_text_hidden = last_hidden_state[score_token_indexes]
+                score_vae_hidden = self._scatter_mean(
+                    last_hidden_state,
+                    score_vae_token_indexes,
+                    score_vae_sample_ids,
+                    num_score_samples,
+                )
+                score_vit_hidden = self._scatter_mean(
+                    last_hidden_state,
+                    score_vit_token_indexes,
+                    score_vit_sample_ids,
+                    num_score_samples,
+                )
+                score_hidden = torch.cat(
+                    [score_text_hidden, score_vae_hidden, score_vit_hidden],
+                    dim=-1,
+                )
+            score_preds = self.score_head(score_hidden).squeeze(-1)
+            if score_labels is not None:
+                score_mse = (score_preds.float() - score_labels.float()) ** 2
+            elif score_token_indexes is None:
+                score_mse = score_preds.float()
+
         mse = None
         has_mse_loss = False
         if self.config.visual_gen:
@@ -262,6 +323,8 @@ class Bagel(PreTrainedModel):
         return dict(
             mse=mse,
             ce=ce,
+            score_mse=score_mse,
+            score=score_preds,
             has_mse=has_mse_loss,
             has_ce=has_ce_loss,
         )

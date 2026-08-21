@@ -181,6 +181,12 @@ class PackedDataset(torch.utils.data.IterableDataset):
             vit_token_seqlens           = list(),
             packed_vit_position_ids     = list(),
             packed_vit_token_indexes    = list(), 
+            score_token_indexes         = list(),
+            score_labels                = list(),
+            score_vae_token_indexes     = list(),
+            score_vae_sample_ids        = list(),
+            score_vit_token_indexes     = list(),
+            score_vit_sample_ids        = list(),
         )
         return sequence_status
 
@@ -232,6 +238,24 @@ class PackedDataset(torch.utils.data.IterableDataset):
             data['packed_label_ids'] = torch.tensor(sequence_status['packed_label_ids'])
             data['ce_loss_indexes'] = torch.tensor(sequence_status['ce_loss_indexes'])
             data['ce_loss_weights'] = torch.tensor(sequence_status['ce_loss_weights'])
+
+        if len(sequence_status['score_labels']) > 0:
+            data['score_token_indexes'] = torch.tensor(
+                sequence_status['score_token_indexes'], dtype=torch.long
+            )
+            data['score_labels'] = torch.tensor(sequence_status['score_labels'], dtype=torch.float32)
+            data['score_vae_token_indexes'] = torch.tensor(
+                sequence_status['score_vae_token_indexes'], dtype=torch.long
+            )
+            data['score_vae_sample_ids'] = torch.tensor(
+                sequence_status['score_vae_sample_ids'], dtype=torch.long
+            )
+            data['score_vit_token_indexes'] = torch.tensor(
+                sequence_status['score_vit_token_indexes'], dtype=torch.long
+            )
+            data['score_vit_sample_ids'] = torch.tensor(
+                sequence_status['score_vit_sample_ids'], dtype=torch.long
+            )
 
         return data
 
@@ -312,6 +336,9 @@ class PackedDataset(torch.utils.data.IterableDataset):
         curr = sequence_status['curr']
         curr_rope_id = 0
         sample_lens = 0
+        score_token_index = None
+        score_vae_token_indexes = []
+        score_vit_token_indexes = []
 
         for item in sequence_plan:
             split_start = item.get('split_start', True)
@@ -338,6 +365,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 # add a <|im_end|> token
                 sequence_status['packed_text_ids'].append(self.eos_token_id)
                 sequence_status['packed_text_indexes'].append(curr)
+                score_token_index = curr
                 if item['special_token_loss'] == 1: # <|im_end|> may have loss
                     sequence_status['ce_loss_indexes'].append(curr)
                     sequence_status['ce_loss_weights'].append(1.0)
@@ -366,6 +394,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 vit_tokens = patchify(image_tensor, self.data_config.vit_patch_size)
                 num_img_tokens = vit_tokens.shape[0]
                 sequence_status['packed_vit_token_indexes'].extend(range(curr, curr + num_img_tokens))
+                score_vit_token_indexes.extend(range(curr, curr + num_img_tokens))
                 curr += num_img_tokens
                 curr_split_len += num_img_tokens
 
@@ -428,6 +457,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                     if split_start:
                         timestep = np.random.randn()
                 else:
+                    score_vae_token_indexes.extend(range(curr, curr + num_img_tokens))
                     timestep = float('-inf')
 
                 sequence_status['packed_timesteps'].extend([timestep] * num_img_tokens)
@@ -463,6 +493,19 @@ class PackedDataset(torch.utils.data.IterableDataset):
 
         sequence_status['curr'] = curr
         sequence_status['sample_lens'].append(sample_lens)
+        if 'score_label' in sample:
+            assert score_token_index is not None
+            score_sample_id = len(sequence_status['score_labels'])
+            sequence_status['score_token_indexes'].append(score_token_index)
+            sequence_status['score_labels'].append(sample['score_label'])
+            sequence_status['score_vae_token_indexes'].extend(score_vae_token_indexes)
+            sequence_status['score_vae_sample_ids'].extend(
+                [score_sample_id] * len(score_vae_token_indexes)
+            )
+            sequence_status['score_vit_token_indexes'].extend(score_vit_token_indexes)
+            sequence_status['score_vit_sample_ids'].extend(
+                [score_sample_id] * len(score_vit_token_indexes)
+            )
         # prepare attention mask
         if not self.use_flex:
             sequence_status['nested_attention_masks'].append(
@@ -514,6 +557,14 @@ class SimpleCustomBatch:
             self.ce_loss_indexes = data["ce_loss_indexes"]
             self.ce_loss_weights = data["ce_loss_weights"]
 
+        if "score_labels" in data.keys():
+            self.score_token_indexes = data["score_token_indexes"]
+            self.score_labels = data["score_labels"]
+            self.score_vae_token_indexes = data["score_vae_token_indexes"]
+            self.score_vae_sample_ids = data["score_vae_sample_ids"]
+            self.score_vit_token_indexes = data["score_vit_token_indexes"]
+            self.score_vit_sample_ids = data["score_vit_sample_ids"]
+
     def pin_memory(self):
         self.packed_text_ids = self.packed_text_ids.pin_memory()
         self.packed_text_indexes = self.packed_text_indexes.pin_memory()
@@ -541,6 +592,14 @@ class SimpleCustomBatch:
             self.packed_label_ids = self.packed_label_ids.pin_memory()
             self.ce_loss_indexes = self.ce_loss_indexes.pin_memory()
             self.ce_loss_weights = self.ce_loss_weights.pin_memory()
+
+        if hasattr(self, 'score_labels'):
+            self.score_token_indexes = self.score_token_indexes.pin_memory()
+            self.score_labels = self.score_labels.pin_memory()
+            self.score_vae_token_indexes = self.score_vae_token_indexes.pin_memory()
+            self.score_vae_sample_ids = self.score_vae_sample_ids.pin_memory()
+            self.score_vit_token_indexes = self.score_vit_token_indexes.pin_memory()
+            self.score_vit_sample_ids = self.score_vit_sample_ids.pin_memory()
 
         return self
 
@@ -571,6 +630,14 @@ class SimpleCustomBatch:
             self.packed_label_ids = self.packed_label_ids.to(device)
             self.ce_loss_indexes = self.ce_loss_indexes.to(device)
             self.ce_loss_weights = self.ce_loss_weights.to(device)
+
+        if hasattr(self, 'score_labels'):
+            self.score_token_indexes = self.score_token_indexes.to(device)
+            self.score_labels = self.score_labels.to(device)
+            self.score_vae_token_indexes = self.score_vae_token_indexes.to(device)
+            self.score_vae_sample_ids = self.score_vae_sample_ids.to(device)
+            self.score_vit_token_indexes = self.score_vit_token_indexes.to(device)
+            self.score_vit_sample_ids = self.score_vit_sample_ids.to(device)
 
         return self
 
@@ -610,6 +677,14 @@ class SimpleCustomBatch:
             data['packed_label_ids'] = self.packed_label_ids
             data['ce_loss_indexes'] = self.ce_loss_indexes
             data['ce_loss_weights'] = self.ce_loss_weights
+
+        if hasattr(self, 'score_labels'):
+            data['score_token_indexes'] = self.score_token_indexes
+            data['score_labels'] = self.score_labels
+            data['score_vae_token_indexes'] = self.score_vae_token_indexes
+            data['score_vae_sample_ids'] = self.score_vae_sample_ids
+            data['score_vit_token_indexes'] = self.score_vit_token_indexes
+            data['score_vit_sample_ids'] = self.score_vit_sample_ids
 
         return data
 

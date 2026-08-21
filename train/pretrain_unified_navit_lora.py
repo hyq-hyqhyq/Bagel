@@ -129,8 +129,8 @@ def save_lora_checkpoint(
     dist.barrier()
 
 
-def sync_lora_gradients(lora_params):
-    for param in lora_params:
+def sync_replicated_gradients(replicated_params):
+    for param in replicated_params:
         if param.grad is not None:
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
             param.grad.div_(dist.get_world_size())
@@ -260,6 +260,10 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Train image understanding branch."}
     )
+    score_head: bool = field(
+        default=False,
+        metadata={"help": "Enable multimodal scalar score regression."}
+    )
 
     # --- bookkeeping & logging ---
     results_dir: str = field(
@@ -379,6 +383,10 @@ class TrainingArguments:
     ce_weight: float = field(
         default=1.0,
         metadata={"help": "Scaling factor for the language cross-entropy loss term."}
+    )
+    score_weight: float = field(
+        default=1.0,
+        metadata={"help": "Scaling factor for the score-regression MSE loss term."}
     )
     ce_loss_reweighting: bool = field(
         default=False,
@@ -566,6 +574,7 @@ def main():
         connector_act=model_args.connector_act,
         interpolate_pos=model_args.interpolate_pos,
         timestep_shift=training_args.timestep_shift,
+        score_head=training_args.score_head,
     )
     model = Bagel(
         language_model,
@@ -634,6 +643,7 @@ def main():
         lora_alpha=training_args.lora_alpha, # X + lora_alpha/lora_rank * AB
         task_type=None,
         target_modules=lora_target_modules,
+        modules_to_save=["score_head"] if training_args.score_head else None,
     )
     model = get_peft_model(model, peft_config)
     if not resume_model_only and resume_from is not None:
@@ -646,13 +656,25 @@ def main():
     for lora_module in lora_modules:
         lora_adapter_modules.extend(lora_module.lora_A.values())
         lora_adapter_modules.extend(lora_module.lora_B.values())
-    for module in lora_adapter_modules:
+    replicated_modules = list(lora_adapter_modules)
+    if training_args.score_head:
+        score_head_module = next(
+            module
+            for name, module in model.named_modules()
+            if name.endswith("score_head")
+        )
+        replicated_modules.append(score_head_module)
+    for module in replicated_modules:
         module.to(device)
-    lora_params = [
-        param for module in lora_adapter_modules for param in module.parameters()
-    ]
+    replicated_params = []
+    replicated_param_ids = set()
+    for module in replicated_modules:
+        for param in module.parameters():
+            if param.requires_grad and id(param) not in replicated_param_ids:
+                replicated_params.append(param)
+                replicated_param_ids.add(id(param))
     fsdp_model = fsdp_with_lora_wrapper(
-        model, fsdp_config, ignored_modules=lora_adapter_modules
+        model, fsdp_config, ignored_modules=replicated_modules
     )
     apply_activation_checkpointing(
         fsdp_model,
@@ -765,6 +787,7 @@ def main():
             loss_dict = fsdp_model(**data)
 
         loss = 0
+        loss_dict.pop("score", None)
         ce = loss_dict["ce"]
         if ce is not None:
             total_ce_tokens = torch.tensor(len(data['ce_loss_indexes']), device=device)
@@ -795,9 +818,24 @@ def main():
             loss_dict["mse"] = torch.tensor(0, device=device)
             total_mse_tokens = torch.tensor(0, device=device)
 
+        score_mse = loss_dict["score_mse"]
+        if score_mse is not None:
+            total_score_samples = torch.tensor(score_mse.numel(), device=device)
+            dist.all_reduce(total_score_samples, op=dist.ReduceOp.SUM)
+            score_mse = (
+                score_mse.sum()
+                * dist.get_world_size()
+                / total_score_samples.clamp_min(1)
+            )
+            loss_dict["score_mse"] = score_mse.detach()
+            loss = loss + score_mse * training_args.score_weight
+        else:
+            loss_dict["score_mse"] = torch.tensor(0, device=device)
+            total_score_samples = torch.tensor(0, device=device)
+
         optimizer.zero_grad()
         loss.backward()
-        sync_lora_gradients(lora_params)
+        sync_replicated_gradients(replicated_params)
         total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
         optimizer.step()
         scheduler.step()
@@ -827,6 +865,7 @@ def main():
             wandb_log['lr'] = optimizer.param_groups[0]['lr']
             wandb_log['total_mse_tokens'] = total_mse_tokens.item()
             wandb_log['total_ce_tokens'] = total_ce_tokens.item()
+            wandb_log['total_score_samples'] = total_score_samples.item()
             wandb_log['total_norm'] = total_norm.item()
             wandb_log['total_samples'] = total_samples.item()
 

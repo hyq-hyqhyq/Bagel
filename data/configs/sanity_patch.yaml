@@ -11,5 +11,5 @@ sanity_patch:
     min_image_size: 224
   is_mandatory: true
   num_used_data:
-  - 4000
+  - 3960
   weight: 1

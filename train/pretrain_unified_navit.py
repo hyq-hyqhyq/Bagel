@@ -219,6 +219,10 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Train image understanding branch."}
     )
+    score_head: bool = field(
+        default=False,
+        metadata={"help": "Enable multimodal scalar score regression."}
+    )
 
     # --- bookkeeping & logging ---
     results_dir: str = field(
@@ -347,6 +351,10 @@ class TrainingArguments:
     ce_weight: float = field(
         default=1.0,
         metadata={"help": "Scaling factor for the language cross-entropy loss term."}
+    )
+    score_weight: float = field(
+        default=1.0,
+        metadata={"help": "Scaling factor for the score-regression MSE loss term."}
     )
     ce_loss_reweighting: bool = field(
         default=False,
@@ -555,6 +563,7 @@ def main(
         connector_act=model_args.connector_act,
         interpolate_pos=model_args.interpolate_pos,
         timestep_shift=training_args.timestep_shift,
+        score_head=training_args.score_head,
     )
     model = Bagel(
         language_model, 
@@ -752,6 +761,7 @@ def main(
                 raise e
         
         loss = 0
+        loss_dict.pop("score", None)
         ce = loss_dict["ce"]
         ce_group_size = torch.tensor(int(loss_dict.pop("has_ce")), device=device)
         dist.all_reduce(ce_group_size, op=dist.ReduceOp.SUM)
@@ -798,6 +808,21 @@ def main(
             loss_dict["mse"] = torch.tensor(0.0, device=device)
             total_mse_tokens = torch.tensor(0, device=device)
 
+        score_mse = loss_dict["score_mse"]
+        if score_mse is not None:
+            total_score_samples = torch.tensor(score_mse.numel(), device=device)
+            dist.all_reduce(total_score_samples, op=dist.ReduceOp.SUM)
+            score_mse = (
+                score_mse.sum()
+                * dist.get_world_size()
+                / total_score_samples.clamp_min(1)
+            )
+            loss_dict["score_mse"] = score_mse.detach()
+            loss = loss + score_mse * training_args.score_weight
+        else:
+            loss_dict["score_mse"] = torch.tensor(0, device=device)
+            total_score_samples = torch.tensor(0, device=device)
+
         loss = loss / training_args.gradient_accumulation_steps
         loss.backward()
 
@@ -841,6 +866,7 @@ def main(
             wandb_log['lr'] = optimizer.param_groups[0]['lr']
             wandb_log['total_mse_tokens'] = total_mse_tokens.item()
             wandb_log['total_ce_tokens'] = total_ce_tokens.item()
+            wandb_log['total_score_samples'] = total_score_samples.item()
             wandb_log['total_norm'] = total_norm.item()
             wandb_log['total_samples'] = total_samples.item()
             wandb_log['tokens_per_sec'] = tokens_per_sec

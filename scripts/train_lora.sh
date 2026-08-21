@@ -2,7 +2,7 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 model_path=${model_path:-/data/bagel/repo/agent/bpipe/models/BAGEL-7B-MoT}
 data_path=${BAGEL_REASON_HEATMAP_DATA_DIR:-/data/bagel/data/perspective_5k/canonical_5k_clean_4402}
-output_path=${output_path:-./results/reason_heatmap_lora}
+output_path=${output_path:-./results/reason_heatmap_lora_score}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
 nproc_per_node=${nproc_per_node:-8}
 master_port=${master_port:-29500}
@@ -11,7 +11,7 @@ save_every=${save_every:-200}
 stop_after_step=${stop_after_step:-0}
 mse_weight=${mse_weight:-50}
 ce_weight=${ce_weight:-0.1}
-wandb_name=${wandb_name:-reason_heatmap_lora_$(date +%Y%m%d_%H%M%S)}
+wandb_name=${wandb_name:-reason_heatmap_lora_score_$(date +%Y%m%d_%H%M%S)}
 wandb_runid=${wandb_runid:-0}
 wandb_offline=${wandb_offline:-False}
 
@@ -36,6 +36,8 @@ torchrun \
   --auto_resume True \
   --resume_model_only True \
   --finetune_from_ema True \
+  --score_head True \
+  --score_weight 1.0 \
   --log_every 1 \
   --lr 2e-5 \
   --num_workers 1 \

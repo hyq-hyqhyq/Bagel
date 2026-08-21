@@ -74,10 +74,25 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
         black_heatmap = Image.new("RGB", good_image.size)
 
         samples = []
-        for input_images, reason, heatmap in [
-            ([good_image], row["good_reason"], black_heatmap),
-            ([bad_image], row["bad_reason"], bad_heatmap),
-            ([good_image, bad_image], row["pair_reason"], bad_heatmap),
+        for input_images, reason, heatmap, score_label in [
+            (
+                [good_image],
+                row["good_reason"],
+                black_heatmap,
+                row.get("good_score", 1.0),
+            ),
+            (
+                [bad_image],
+                row["bad_reason"],
+                bad_heatmap,
+                row.get("bad_score", 0.0),
+            ),
+            (
+                [good_image, bad_image],
+                row["pair_reason"],
+                bad_heatmap,
+                row.get("pair_score"),
+            ),
         ]:
             data = self._init_data()
             for input_image in input_images:
@@ -103,6 +118,8 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                 need_vae=False,
                 need_vit=False,
             )
+            if score_label is not None:
+                data["score_label"] = float(score_label)
             samples.append(data)
         return samples
 

@@ -7,13 +7,13 @@ from .interleave_datasets.reason_heatmap_dataset import ReasonHeatmapIterableDat
 from .interleave_datasets.sanity_patch_dataset import SanityPatchIterableDataset
 
 
-def dataset_entry(env_name):
+def dataset_entry(env_name, metadata_env_name=None):
     data_dir = os.environ.get(env_name)
+    metadata_path = os.environ.get(metadata_env_name) if metadata_env_name else None
     return {
         "data_dir": data_dir,
-        "jsonl_path": os.path.join(data_dir, "metadata/train.jsonl")
-        if data_dir
-        else None,
+        "jsonl_path": metadata_path
+        or (os.path.join(data_dir, "metadata/train.jsonl") if data_dir else None),
     }
 
 
@@ -25,9 +25,15 @@ DATASET_REGISTRY = {
 
 DATASET_INFO = {
     "reason_heatmap": {
-        "perspective": dataset_entry("BAGEL_REASON_HEATMAP_DATA_DIR"),
+        "perspective": dataset_entry(
+            "BAGEL_REASON_HEATMAP_DATA_DIR",
+            "BAGEL_REASON_HEATMAP_METADATA_PATH",
+        ),
     },
     "sanity_patch": {
-        "patch": dataset_entry("BAGEL_SANITY_PATCH_DATA_DIR"),
+        "patch": dataset_entry(
+            "BAGEL_SANITY_PATCH_DATA_DIR",
+            "BAGEL_SANITY_PATCH_METADATA_PATH",
+        ),
     },
 }

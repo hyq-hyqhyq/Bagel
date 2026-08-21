@@ -10,9 +10,9 @@ master_addr=${master_addr:-127.0.0.1}
 master_port=${master_port:-29500}
 model_path=${model_path:-models/BAGEL-7B-MoT}
 data_path=${BAGEL_REASON_HEATMAP_DATA_DIR:-/data/bagel/data/perspective_5k/canonical_5k_clean_4402}
-output_path=${output_path:-results/reason_heatmap}
+output_path=${output_path:-results/reason_heatmap_score}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
-wandb_name=${wandb_name:-reason_heatmap}
+wandb_name=${wandb_name:-reason_heatmap_score}
 wandb_runid=${wandb_runid:-0}
 
 export BAGEL_REASON_HEATMAP_DATA_DIR="$data_path"
@@ -34,6 +34,8 @@ torchrun \
   --finetune_from_ema True \
   --visual_gen True \
   --visual_und True \
+  --score_head True \
+  --score_weight 1.0 \
   --freeze_vae True \
   --freeze_vit False \
   --freeze_llm False \
