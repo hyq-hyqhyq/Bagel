@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Upload completed raw FSDP models and remove their full local checkpoints.
+"""Upload completed raw FSDP models and reclaim old local checkpoints.
 
 This watcher is intentionally conservative about checkpoint completion. A numeric
 step directory is eligible only after every expected FSDP file exists, its full
 file manifest has remained unchanged for a stability window, and no process has
 an open file below the directory. Only ``model.safetensors`` is uploaded. The
-entire local step directory is removed after the remote raw model is verified.
+By default the entire local step directory is removed after the remote raw model
+is verified. ``--keep-latest-local N`` instead retains the newest N numeric
+checkpoints per watched run and prunes older verified uploads.
 """
 
 from __future__ import annotations
@@ -348,6 +350,133 @@ def safe_delete_checkpoint(root: Path, checkpoint: Path) -> None:
     shutil.rmtree(resolved)
 
 
+def cached_upload_for_current_checkpoint(
+    spec: WatchSpec,
+    checkpoint: Path,
+    entry: dict[str, Any],
+    signature: str,
+) -> dict[str, Any] | None:
+    """Return verified state for an unchanged local checkpoint."""
+    upload = entry.get("upload")
+    if not isinstance(upload, dict):
+        return None
+    if entry.get("observed_signature") != signature:
+        return None
+
+    model = checkpoint / "model.safetensors"
+    local_size = model.stat().st_size
+    local_sha256 = upload.get("local_sha256")
+    if (
+        upload.get("path_in_repo") != remote_path(spec, checkpoint)
+        or upload.get("local_size") != local_size
+        or not isinstance(local_sha256, str)
+        or not SHA256_RE.fullmatch(local_sha256)
+    ):
+        return None
+
+    return upload
+
+
+def verified_upload_for_current_checkpoint(
+    api: HfApi,
+    spec: WatchSpec,
+    checkpoint: Path,
+    entry: dict[str, Any],
+    signature: str,
+    repo_id: str,
+    repo_type: str,
+) -> dict[str, Any] | None:
+    """Recheck a cached upload against Hugging Face without hashing again."""
+    upload = cached_upload_for_current_checkpoint(
+        spec,
+        checkpoint,
+        entry,
+        signature,
+    )
+    if upload is None:
+        return None
+    return reuse_verified_upload(
+        api,
+        entry,
+        repo_id,
+        repo_type,
+        upload["path_in_repo"],
+        upload["local_size"],
+        upload["local_sha256"],
+    )
+
+
+def prune_old_uploaded_checkpoints(
+    api: HfApi,
+    spec: WatchSpec,
+    run_state: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    if args.keep_local or args.keep_latest_local <= 0:
+        return
+
+    checkpoints = checkpoint_dirs(
+        spec.checkpoint_root,
+        min_step=args.min_step,
+        max_step=args.max_step,
+        step_multiple=args.step_multiple,
+    )
+    uploaded_checkpoints = [
+        checkpoint
+        for checkpoint in checkpoints
+        if isinstance(
+            run_state.get("checkpoints", {})
+            .get(checkpoint.name, {})
+            .get("upload"),
+            dict,
+        )
+    ]
+    while len(uploaded_checkpoints) > args.keep_latest_local:
+        checkpoint = uploaded_checkpoints[0]
+        entry = run_state.setdefault("checkpoints", {}).setdefault(
+            checkpoint.name, {}
+        )
+        missing = missing_expected_files(checkpoint, args.optimizer_shards)
+        if missing:
+            logging.info(
+                "Cannot prune oldest %s/%s; checkpoint is incomplete",
+                spec.name,
+                checkpoint.name,
+            )
+            return
+        if has_open_file(checkpoint):
+            logging.info(
+                "Cannot prune oldest %s/%s; files are still open",
+                spec.name,
+                checkpoint.name,
+            )
+            return
+
+        signature = manifest_signature(file_manifest(checkpoint))
+        upload = verified_upload_for_current_checkpoint(
+            api,
+            spec,
+            checkpoint,
+            entry,
+            signature,
+            args.repo_id,
+            args.repo_type,
+        )
+        if upload is None:
+            logging.info(
+                "Cannot prune oldest %s/%s; remote upload is not verified",
+                spec.name,
+                checkpoint.name,
+            )
+            return
+
+        safe_delete_checkpoint(spec.checkpoint_root, checkpoint)
+        entry["deleted_at_utc"] = utc_now()
+        entry.pop("retained_local_at_utc", None)
+        atomic_write_json(args.state_file, args.state)
+        uploaded_checkpoints.pop(0)
+
+
 def process_checkpoint(
     api: HfApi,
     spec: WatchSpec,
@@ -391,6 +520,31 @@ def process_checkpoint(
 
     model = checkpoint / "model.safetensors"
     model_stat = model.stat()
+    upload = cached_upload_for_current_checkpoint(
+        spec,
+        checkpoint,
+        entry,
+        signature,
+    )
+    if upload is not None:
+        if args.keep_local or args.keep_latest_local > 0:
+            return True
+        upload = verified_upload_for_current_checkpoint(
+            api,
+            spec,
+            checkpoint,
+            entry,
+            signature,
+            args.repo_id,
+            args.repo_type,
+        )
+        if upload is None:
+            return False
+        safe_delete_checkpoint(spec.checkpoint_root, checkpoint)
+        entry["deleted_at_utc"] = utc_now()
+        atomic_write_json(args.state_file, args.state)
+        return True
+
     tensor_count = validate_raw_model(model)
     logging.info(
         "%s/%s raw model header is valid (%d tensors); computing SHA-256",
@@ -447,6 +601,16 @@ def process_checkpoint(
         entry["kept_local"] = True
         return True
 
+    if args.keep_latest_local > 0:
+        entry["retained_local_at_utc"] = utc_now()
+        logging.info(
+            "Retaining %s locally; newest %d checkpoints are kept",
+            checkpoint,
+            args.keep_latest_local,
+        )
+        atomic_write_json(args.state_file, args.state)
+        return True
+
     safe_delete_checkpoint(spec.checkpoint_root, checkpoint)
     entry["deleted_at_utc"] = utc_now()
     atomic_write_json(args.state_file, args.state)
@@ -462,7 +626,11 @@ def stop_step_is_done(specs: list[WatchSpec], state: dict[str, Any], step: int) 
             .get("checkpoints", {})
             .get(checkpoint_name, {})
         )
-        if not entry.get("deleted_at_utc") and not entry.get("kept_local"):
+        if not (
+            entry.get("deleted_at_utc")
+            or entry.get("kept_local")
+            or isinstance(entry.get("upload"), dict)
+        ):
             return False
     return True
 
@@ -499,6 +667,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-file", type=Path, required=True)
     parser.add_argument("--lock-file", type=Path)
     parser.add_argument("--keep-local", action="store_true")
+    parser.add_argument(
+        "--keep-latest-local",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Keep the newest N checkpoints per run after verified raw-model "
+            "uploads; older verified checkpoint directories are deleted."
+        ),
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
@@ -510,6 +688,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--step-multiple must be positive")
     if args.max_step is not None and args.max_step < args.min_step:
         parser.error("--max-step must be >= --min-step")
+    if args.keep_latest_local < 0:
+        parser.error("--keep-latest-local must be non-negative")
+    if args.keep_local and args.keep_latest_local:
+        parser.error("--keep-local and --keep-latest-local cannot be combined")
     return args
 
 
@@ -592,6 +774,13 @@ def main() -> int:
                             spec.name,
                             checkpoint.name,
                         )
+
+                prune_old_uploaded_checkpoints(
+                    api,
+                    spec,
+                    run_state,
+                    args,
+                )
 
                 run_state["local_checkpoints"] = [
                     path.name
