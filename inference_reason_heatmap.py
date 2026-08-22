@@ -5,8 +5,13 @@ import argparse
 
 import torch
 from accelerate import load_checkpoint_and_dispatch
+from safetensors import safe_open
 
-from inference_reason_heatmap_lora import build_model_architecture, run_inference
+from inference_reason_heatmap_lora import (
+    SAMPLE_TYPES,
+    build_model_architecture,
+    run_inference,
+)
 from sanity_patch.settings import (
     BINARY_MASK_THRESHOLD,
     DENSE_CFG_IMG_SCALE,
@@ -39,8 +44,27 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument(
         "--sample_type",
-        choices=("good", "bad", "pair"),
+        choices=SAMPLE_TYPES,
         default="bad",
+    )
+    parser.add_argument(
+        "--prompt_domain",
+        choices=("sanity", "perspective"),
+        default="sanity",
+    )
+    parser.add_argument(
+        "--two_round",
+        action="store_true",
+        help=(
+            "Run refinement followed by verification, feeding the generated "
+            "refined image into the second round."
+        ),
+    )
+    parser.add_argument(
+        "--two_round_quality",
+        choices=("good", "bad"),
+        default="bad",
+        help="Choose the original image used by --two_round.",
     )
     parser.add_argument(
         "--output_dir",
@@ -76,11 +100,25 @@ def parse_args():
         raise ValueError("num_samples must be positive.")
     if not 0 <= args.binary_threshold <= 255:
         raise ValueError("binary_threshold must be between 0 and 255.")
+    if args.two_round and args.heatmap_only:
+        raise ValueError("--two_round cannot be combined with --heatmap_only.")
+    if args.heatmap_only and args.sample_type not in ("good", "bad", "pair"):
+        raise ValueError(
+            "--heatmap_only only supports the legacy good, bad, and pair tasks."
+        )
     return args
 
 
 def build_model(model_path, checkpoint_path, device):
-    model, vae_model = build_model_architecture(model_path)
+    with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+        score_head = any(
+            key.startswith("score_head.") or ".score_head." in key
+            for key in f.keys()
+        )
+    model, vae_model = build_model_architecture(
+        model_path,
+        score_head=score_head,
+    )
     model = load_checkpoint_and_dispatch(
         model,
         checkpoint=checkpoint_path,

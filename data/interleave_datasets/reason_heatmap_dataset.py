@@ -8,6 +8,10 @@ from PIL import Image, ImageFile, PngImagePlugin
 
 from .interleave_t2i_dataset import InterleavedBaseIterableDataset
 from ..data_utils import pil_img2rgb
+from ..reason_heatmap_prompts import (
+    PERSPECTIVE_REFINE_PROMPT,
+    PERSPECTIVE_VERIFY_PROMPT,
+)
 
 
 Image.MAX_IMAGE_PIXELS = 200000000
@@ -72,30 +76,64 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
         bad_heatmap = self._read_image(os.path.join(data_dir, row["bad_heatmap"]))
         black_heatmap = Image.new("RGB", good_image.size)
 
+        if self.heatmap_only:
+            task_specs = [
+                (
+                    [good_image],
+                    "Analyze the perspective and projection realism of this image.",
+                    row["good_reason"],
+                    black_heatmap,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image],
+                    "Analyze the perspective and projection realism of this image.",
+                    row["bad_reason"],
+                    bad_heatmap,
+                    row.get("bad_score", 0.0),
+                ),
+                (
+                    [good_image, bad_image],
+                    "Compare the two images and explain the perspective and projection realism difference.",
+                    row["pair_reason"],
+                    bad_heatmap,
+                    row.get("pair_score"),
+                ),
+            ]
+        else:
+            task_specs = [
+                (
+                    [good_image],
+                    PERSPECTIVE_REFINE_PROMPT,
+                    row["good_reason"],
+                    good_image,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image],
+                    PERSPECTIVE_REFINE_PROMPT,
+                    row["bad_reason"],
+                    good_image,
+                    row.get("bad_score", 0.0),
+                ),
+                (
+                    [good_image, good_image],
+                    PERSPECTIVE_VERIFY_PROMPT,
+                    row["good_reason"],
+                    black_heatmap,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image, good_image],
+                    PERSPECTIVE_VERIFY_PROMPT,
+                    row["bad_reason"],
+                    bad_heatmap,
+                    row.get("bad_score", 0.0),
+                ),
+            ]
+
         samples = []
-        for input_images, prompt, reason, heatmap, score_label in [
-            (
-                [good_image],
-                "Analyze the perspective and projection realism of this image.",
-                row["good_reason"],
-                black_heatmap,
-                row.get("good_score", 1.0),
-            ),
-            (
-                [bad_image],
-                "Analyze the perspective and projection realism of this image.",
-                row["bad_reason"],
-                bad_heatmap,
-                row.get("bad_score", 0.0),
-            ),
-            (
-                [good_image, bad_image],
-                "Compare the two images and explain the perspective and projection realism difference.",
-                row["pair_reason"],
-                bad_heatmap,
-                row.get("pair_score"),
-            ),
-        ]:
+        for input_images, prompt, reason, target_image, score_label in task_specs:
             data = self._init_data()
             for input_image in input_images:
                 data = self._add_image(
@@ -115,7 +153,7 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
                 )
             data = self._add_image(
                 data,
-                heatmap,
+                target_image,
                 need_loss=True,
                 need_vae=False,
                 need_vit=False,

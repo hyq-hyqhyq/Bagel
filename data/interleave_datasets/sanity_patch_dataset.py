@@ -10,6 +10,7 @@ from sanity_patch.settings import SANITY_PATCH_PROMPT
 
 from .interleave_t2i_dataset import InterleavedBaseIterableDataset
 from ..data_utils import pil_img2rgb
+from ..reason_heatmap_prompts import SANITY_REFINE_PROMPT, SANITY_VERIFY_PROMPT
 
 
 Image.MAX_IMAGE_PIXELS = 200000000
@@ -73,27 +74,64 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
         bad_heatmap = self._read_image(os.path.join(data_dir, row["bad_heatmap"]))
         black_heatmap = Image.new("RGB", good_image.size)
 
+        if self.heatmap_only:
+            task_specs = [
+                (
+                    [good_image],
+                    SANITY_PATCH_PROMPT,
+                    row["good_reason"],
+                    black_heatmap,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image],
+                    SANITY_PATCH_PROMPT,
+                    row["bad_reason"],
+                    bad_heatmap,
+                    row.get("bad_score", 0.0),
+                ),
+                (
+                    [good_image, bad_image],
+                    SANITY_PATCH_PROMPT,
+                    row["pair_reason"],
+                    bad_heatmap,
+                    row.get("pair_score"),
+                ),
+            ]
+        else:
+            task_specs = [
+                (
+                    [good_image],
+                    SANITY_REFINE_PROMPT,
+                    row["good_reason"],
+                    good_image,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image],
+                    SANITY_REFINE_PROMPT,
+                    row["bad_reason"],
+                    good_image,
+                    row.get("bad_score", 0.0),
+                ),
+                (
+                    [good_image, good_image],
+                    SANITY_VERIFY_PROMPT,
+                    row["good_reason"],
+                    black_heatmap,
+                    row.get("good_score", 1.0),
+                ),
+                (
+                    [bad_image, good_image],
+                    SANITY_VERIFY_PROMPT,
+                    row["bad_reason"],
+                    bad_heatmap,
+                    row.get("bad_score", 0.0),
+                ),
+            ]
+
         samples = []
-        for input_images, reason, heatmap, score_label in [
-            (
-                [good_image],
-                row["good_reason"],
-                black_heatmap,
-                row.get("good_score", 1.0),
-            ),
-            (
-                [bad_image],
-                row["bad_reason"],
-                bad_heatmap,
-                row.get("bad_score", 0.0),
-            ),
-            (
-                [good_image, bad_image],
-                row["pair_reason"],
-                bad_heatmap,
-                row.get("pair_score"),
-            ),
-        ]:
+        for input_images, prompt, reason, target_image, score_label in task_specs:
             data = self._init_data()
             for input_image in input_images:
                 data = self._add_image(
@@ -103,7 +141,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     need_vae=True,
                     need_vit=True,
                 )
-            data = self._add_text(data, SANITY_PATCH_PROMPT, need_loss=False)
+            data = self._add_text(data, prompt, need_loss=False)
             if not self.heatmap_only:
                 data = self._add_text(
                     data,
@@ -113,7 +151,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                 )
             data = self._add_image(
                 data,
-                heatmap,
+                target_image,
                 need_loss=True,
                 need_vae=False,
                 need_vit=False,

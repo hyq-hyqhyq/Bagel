@@ -90,12 +90,7 @@ class Bagel(PreTrainedModel):
             self.vit_pos_embed = PositionEmbedding(self.vit_max_num_patch_per_side, self.hidden_size)
 
         if config.score_head:
-            self.score_head = nn.Sequential(
-                nn.LayerNorm(self.hidden_size * 3),
-                nn.Linear(self.hidden_size * 3, config.score_head_hidden_size),
-                nn.SiLU(),
-                nn.Linear(config.score_head_hidden_size, 1),
-            )
+            self.init_score_head()
 
         if config.interpolate_pos:
             self.get_flattened_position_ids = get_flattened_position_ids_interpolate
@@ -104,6 +99,17 @@ class Bagel(PreTrainedModel):
 
         self.config = config
         self._init_weights()
+
+    def init_score_head(self):
+        if hasattr(self, "score_head"):
+            return
+        self.score_head = nn.Sequential(
+            nn.LayerNorm(self.hidden_size * 3),
+            nn.Linear(self.hidden_size * 3, self.config.score_head_hidden_size),
+            nn.SiLU(),
+            nn.Linear(self.config.score_head_hidden_size, 1),
+        )
+        self.config.score_head = True
 
     def _init_weights(self):
         if self.config.visual_gen:
@@ -374,6 +380,7 @@ class Bagel(PreTrainedModel):
         packed_text_indexes: torch.LongTensor,
         packed_key_value_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
+        return_hidden: bool = False,
     ):
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
 
@@ -395,6 +402,8 @@ class Bagel(PreTrainedModel):
         )
         past_key_values = output.past_key_values
 
+        if return_hidden:
+            return past_key_values, output.packed_query_sequence
         return past_key_values
 
     def prepare_vit_images(self, curr_kvlens, curr_rope, images, transforms, new_token_ids):
@@ -474,6 +483,7 @@ class Bagel(PreTrainedModel):
         packed_indexes: torch.LongTensor,
         packed_key_value_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
+        return_hidden: bool = False,
     ):
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
@@ -513,6 +523,8 @@ class Bagel(PreTrainedModel):
         )
         past_key_values = output.past_key_values
 
+        if return_hidden:
+            return past_key_values, output.packed_query_sequence
         return past_key_values
 
     def prepare_vae_images(self, curr_kvlens, curr_rope, images, transforms, new_token_ids, timestep=0):
@@ -605,6 +617,7 @@ class Bagel(PreTrainedModel):
         packed_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
         packed_key_value_indexes: torch.Tensor,
+        return_hidden: bool = False,
     ):
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
@@ -648,6 +661,8 @@ class Bagel(PreTrainedModel):
         )
         past_key_values = output.past_key_values
 
+        if return_hidden:
+            return past_key_values, output.packed_query_sequence
         return past_key_values
 
     def prepare_vae_latent(self, curr_kvlens, curr_rope, image_sizes, new_token_ids):

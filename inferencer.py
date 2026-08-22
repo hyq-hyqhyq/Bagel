@@ -33,6 +33,11 @@ class InterleaveInferencer:
             'kv_lens': [0],
             'ropes': [0],
             'past_key_values': NaiveCache(self.model.config.llm_config.num_hidden_layers),
+            'score_text_hidden': None,
+            'score_vae_hidden_sum': None,
+            'score_vae_token_count': 0,
+            'score_vit_hidden_sum': None,
+            'score_vit_token_count': 0,
         }
         return gen_context
 
@@ -51,10 +56,15 @@ class InterleaveInferencer:
             new_token_ids=self.new_token_ids,
         )
 
-        past_key_values = self.model.forward_cache_update_text(past_key_values, **generation_input)        
+        past_key_values, hidden_states = self.model.forward_cache_update_text(
+            past_key_values,
+            return_hidden=True,
+            **generation_input,
+        )
         gen_context['kv_lens'] = kv_lens
         gen_context['ropes'] = ropes
         gen_context['past_key_values'] = past_key_values
+        gen_context['score_text_hidden'] = hidden_states[-1]
         
         return gen_context
 
@@ -76,7 +86,19 @@ class InterleaveInferencer:
                 transforms=self.vae_transform, 
                 new_token_ids=self.new_token_ids,
             )
-            past_key_values = self.model.forward_cache_update_vae(self.vae_model, past_key_values, **generation_input)
+            past_key_values, hidden_states = self.model.forward_cache_update_vae(
+                self.vae_model,
+                past_key_values,
+                return_hidden=True,
+                **generation_input,
+            )
+            vae_hidden = hidden_states[generation_input['packed_vae_token_indexes']]
+            vae_hidden_sum = vae_hidden.sum(dim=0)
+            if gen_context['score_vae_hidden_sum'] is None:
+                gen_context['score_vae_hidden_sum'] = vae_hidden_sum
+            else:
+                gen_context['score_vae_hidden_sum'] += vae_hidden_sum
+            gen_context['score_vae_token_count'] += vae_hidden.shape[0]
         
         if vit:
             ## update vit
@@ -87,13 +109,45 @@ class InterleaveInferencer:
                 transforms=self.vit_transform, 
                 new_token_ids=self.new_token_ids,
             )
-            past_key_values = self.model.forward_cache_update_vit(past_key_values, **generation_input)
+            past_key_values, hidden_states = self.model.forward_cache_update_vit(
+                past_key_values,
+                return_hidden=True,
+                **generation_input,
+            )
+            vit_hidden = hidden_states[generation_input['packed_vit_token_indexes']]
+            vit_hidden_sum = vit_hidden.sum(dim=0)
+            if gen_context['score_vit_hidden_sum'] is None:
+                gen_context['score_vit_hidden_sum'] = vit_hidden_sum
+            else:
+                gen_context['score_vit_hidden_sum'] += vit_hidden_sum
+            gen_context['score_vit_token_count'] += vit_hidden.shape[0]
 
         gen_context['kv_lens'] = kv_lens
         gen_context['ropes'] = ropes
         gen_context['past_key_values'] = past_key_values
         
         return gen_context
+
+    @torch.no_grad()
+    def predict_score(self, gen_context):
+        score_head = getattr(self.model, 'score_head', None)
+        if score_head is None and hasattr(self.model, 'get_base_model'):
+            score_head = getattr(self.model.get_base_model(), 'score_head', None)
+        if score_head is None:
+            return None
+
+        text_hidden = gen_context['score_text_hidden']
+        if text_hidden is None:
+            return None
+        vae_hidden = gen_context['score_vae_hidden_sum']
+        vit_hidden = gen_context['score_vit_hidden_sum']
+        if vae_hidden is None or vit_hidden is None:
+            return None
+
+        vae_hidden = vae_hidden / max(gen_context['score_vae_token_count'], 1)
+        vit_hidden = vit_hidden / max(gen_context['score_vit_token_count'], 1)
+        score_hidden = torch.cat([text_hidden, vae_hidden, vit_hidden], dim=-1)
+        return score_head(score_hidden).float().item()
 
     @torch.no_grad()
     def gen_image(
@@ -264,6 +318,10 @@ class InterleaveInferencer:
                     gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
                     gen_context = self.update_context_text(gen_text, gen_context)
                     output_list.append(gen_text)
+
+                score = self.predict_score(gen_context)
+                if score is not None:
+                    output_list.append(score)
 
                 img = self.gen_image(
                     image_shapes, 

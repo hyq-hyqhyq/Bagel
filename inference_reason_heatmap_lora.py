@@ -13,6 +13,12 @@ from PIL import Image
 from safetensors.torch import load_file
 
 from data.data_utils import add_special_tokens, pil_img2rgb
+from data.reason_heatmap_prompts import (
+    PERSPECTIVE_REFINE_PROMPT,
+    PERSPECTIVE_VERIFY_PROMPT,
+    SANITY_REFINE_PROMPT,
+    SANITY_VERIFY_PROMPT,
+)
 from data.transforms import ImageTransform
 from inferencer import InterleaveInferencer
 from modeling.autoencoder import load_ae
@@ -38,8 +44,15 @@ from sanity_patch.settings import (
 )
 
 
-SINGLE_IMAGE_PROMPT = SANITY_PATCH_PROMPT
-PAIR_PROMPT = SANITY_PATCH_PROMPT
+SAMPLE_TYPES = (
+    "good",
+    "bad",
+    "pair",
+    "good_refine",
+    "bad_refine",
+    "good_verify",
+    "bad_verify",
+)
 LORA_VARIANTS = {
     "normal": {
         "checkpoint_path": (
@@ -95,8 +108,27 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument(
         "--sample_type",
-        choices=("good", "bad", "pair"),
+        choices=SAMPLE_TYPES,
         default="bad",
+    )
+    parser.add_argument(
+        "--prompt_domain",
+        choices=("sanity", "perspective"),
+        default="sanity",
+    )
+    parser.add_argument(
+        "--two_round",
+        action="store_true",
+        help=(
+            "Run refinement followed by verification, feeding the generated "
+            "refined image into the second round."
+        ),
+    )
+    parser.add_argument(
+        "--two_round_quality",
+        choices=("good", "bad"),
+        default="bad",
+        help="Choose the original image used by --two_round.",
     )
     parser.add_argument(
         "--output_dir",
@@ -135,6 +167,12 @@ def parse_args():
         raise ValueError("num_samples must be positive.")
     if not 0 <= args.binary_threshold <= 255:
         raise ValueError("binary_threshold must be between 0 and 255.")
+    if args.two_round and args.heatmap_only:
+        raise ValueError("--two_round cannot be combined with --heatmap_only.")
+    if args.heatmap_only and args.sample_type not in ("good", "bad", "pair"):
+        raise ValueError(
+            "--heatmap_only only supports the legacy good, bad, and pair tasks."
+        )
     return args
 
 
@@ -153,32 +191,86 @@ def load_jsonl_row(path, row_index):
     raise IndexError(f"row_index {row_index} is outside {path}")
 
 
-def prepare_sample(row, data_dir, sample_type):
+def get_domain_prompts(prompt_domain):
+    if prompt_domain == "perspective":
+        return PERSPECTIVE_REFINE_PROMPT, PERSPECTIVE_VERIFY_PROMPT
+    return SANITY_REFINE_PROMPT, SANITY_VERIFY_PROMPT
+
+
+def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     good_image_path = os.path.join(data_dir, row["good_image"])
     bad_image_path = os.path.join(data_dir, row["bad_image"])
     heatmap_path = os.path.join(data_dir, row["bad_heatmap"])
+    good_image = pil_img2rgb(Image.open(good_image_path))
+    bad_image = pil_img2rgb(Image.open(bad_image_path))
+    bad_heatmap = pil_img2rgb(Image.open(heatmap_path))
+    black_heatmap = Image.new("RGB", good_image.size)
+
+    refine_prompt, verify_prompt = get_domain_prompts(prompt_domain)
 
     if sample_type == "good":
         image_paths = [good_image_path]
-        prompt = SINGLE_IMAGE_PROMPT
+        images = [good_image]
+        prompt = SANITY_PATCH_PROMPT
         reason = row["good_reason"]
-        target = Image.new("RGB", Image.open(good_image_path).size)
+        target = black_heatmap
+        output_type = "heatmap"
+        target_score = row.get("good_score", 1.0)
     elif sample_type == "bad":
         image_paths = [bad_image_path]
-        prompt = SINGLE_IMAGE_PROMPT
+        images = [bad_image]
+        prompt = SANITY_PATCH_PROMPT
         reason = row["bad_reason"]
-        target = pil_img2rgb(Image.open(heatmap_path))
-    else:
+        target = bad_heatmap
+        output_type = "heatmap"
+        target_score = row.get("bad_score", 0.0)
+    elif sample_type == "pair":
         image_paths = [good_image_path, bad_image_path]
-        prompt = PAIR_PROMPT
+        images = [good_image, bad_image]
+        prompt = SANITY_PATCH_PROMPT
         reason = row["pair_reason"]
-        target = pil_img2rgb(Image.open(heatmap_path))
+        target = bad_heatmap
+        output_type = "heatmap"
+        target_score = row.get("pair_score")
+    elif sample_type == "good_refine":
+        image_paths = [good_image_path]
+        images = [good_image]
+        prompt = refine_prompt
+        reason = row["good_reason"]
+        target = good_image
+        output_type = "image"
+        target_score = row.get("good_score", 1.0)
+    elif sample_type == "bad_refine":
+        image_paths = [bad_image_path]
+        images = [bad_image]
+        prompt = refine_prompt
+        reason = row["bad_reason"]
+        target = good_image
+        output_type = "image"
+        target_score = row.get("bad_score", 0.0)
+    elif sample_type == "good_verify":
+        image_paths = [good_image_path, good_image_path]
+        images = [good_image, good_image.copy()]
+        prompt = verify_prompt
+        reason = row["good_reason"]
+        target = black_heatmap
+        output_type = "heatmap"
+        target_score = row.get("good_score", 1.0)
+    elif sample_type == "bad_verify":
+        image_paths = [bad_image_path, good_image_path]
+        images = [bad_image, good_image]
+        prompt = verify_prompt
+        reason = row["bad_reason"]
+        target = bad_heatmap
+        output_type = "heatmap"
+        target_score = row.get("bad_score", 0.0)
+    else:
+        raise ValueError(f"Unsupported sample_type: {sample_type}")
 
-    images = [pil_img2rgb(Image.open(path)) for path in image_paths]
-    return images, image_paths, prompt, reason, target
+    return images, image_paths, prompt, reason, target, output_type, target_score
 
 
-def build_model_architecture(model_path):
+def build_model_architecture(model_path, score_head=False):
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
@@ -199,6 +291,7 @@ def build_model_architecture(model_path):
         connector_act="gelu_pytorch_tanh",
         latent_patch_size=2,
         max_latent_size=64,
+        score_head=score_head,
     )
 
     with init_empty_weights():
@@ -224,6 +317,9 @@ def normalize_lora_state_dict(state_dict):
 def build_model(model_path, checkpoint_path, device):
     from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
+    lora_config = LoraConfig.from_pretrained(checkpoint_path)
+    modules_to_save = lora_config.modules_to_save or []
+    score_head = "score_head" in modules_to_save
     model, vae_model = build_model_architecture(model_path)
 
     model = load_checkpoint_and_dispatch(
@@ -233,7 +329,9 @@ def build_model(model_path, checkpoint_path, device):
         dtype=torch.bfloat16,
     )
 
-    lora_config = LoraConfig.from_pretrained(checkpoint_path)
+    if score_head:
+        model.init_score_head()
+        model.score_head.to(device=device, dtype=torch.bfloat16)
     lora_config.inference_mode = True
     model = get_peft_model(model, lora_config)
     adapter_path = os.path.join(checkpoint_path, "adapter_model.safetensors")
@@ -290,8 +388,131 @@ def generate_reason_heatmap(
         num_timesteps=num_timesteps,
         **dense_kwargs,
     )
-    generated_reason = None if heatmap_only else outputs[0]
-    return generated_reason, outputs[-1]
+    generated_reason = next(
+        (item for item in outputs if isinstance(item, str)),
+        None,
+    )
+    predicted_score = next(
+        (item for item in outputs if isinstance(item, float)),
+        None,
+    )
+    return generated_reason, predicted_score, outputs[-1]
+
+
+def run_and_save_task(
+    inferencer,
+    args,
+    images,
+    image_paths,
+    prompt,
+    target_reason,
+    target,
+    output_type,
+    target_score,
+    sample_type,
+    sample_dir,
+    metadata_path,
+    row_index,
+    row,
+    metadata_extra=None,
+    task_metadata=None,
+):
+    prompt_suffix = args.prompt_suffix.strip()
+    if prompt_suffix:
+        prompt = f"{prompt} {prompt_suffix}"
+    generated_reason, predicted_score, prediction_raw = generate_reason_heatmap(
+        inferencer=inferencer,
+        images=images,
+        prompt=prompt,
+        cfg_text_scale=args.cfg_text_scale,
+        cfg_img_scale=args.cfg_img_scale,
+        num_timesteps=args.num_timesteps,
+        timestep_shift=args.timestep_shift,
+        heatmap_only=args.heatmap_only,
+    )
+    target_original = target.copy()
+    target_model = inferencer.vae_transform.resize_transform(target)
+
+    os.makedirs(sample_dir, exist_ok=True)
+    prediction_raw.save(os.path.join(sample_dir, "prediction_raw.png"))
+    prediction = prediction_raw.resize(
+        images[0].size,
+        resample=(
+            Image.Resampling.NEAREST
+            if output_type == "heatmap"
+            else Image.Resampling.LANCZOS
+        ),
+    )
+    if output_type == "heatmap":
+        prediction = to_binary_mask(
+            prediction,
+            threshold=args.binary_threshold,
+        )
+    prediction.save(os.path.join(sample_dir, "prediction.png"))
+    target_original.save(os.path.join(sample_dir, "target.png"))
+    target_model.save(os.path.join(sample_dir, "target_model.png"))
+    for index, image in enumerate(images):
+        image.save(os.path.join(sample_dir, f"input_{index}.png"))
+    if generated_reason is not None:
+        with open(
+            os.path.join(sample_dir, "reason.txt"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write(generated_reason)
+    if predicted_score is not None:
+        with open(
+            os.path.join(sample_dir, "score.txt"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write(f"{predicted_score:.8f}\n")
+
+    metadata = {
+        "checkpoint_path": args.checkpoint_path,
+        "metadata_path": metadata_path,
+        "row_index": row_index,
+        "source_row_index": row.get("source_row_index"),
+        "sample_id": row.get("sample_id"),
+        "source_split": row.get("split"),
+        "sample_type": sample_type,
+        "prompt_domain": args.prompt_domain,
+        "output_type": output_type,
+        "predicted_score": predicted_score,
+        "target_score": target_score,
+        "image_paths": image_paths,
+        "prompt": prompt,
+        "heatmap_only": args.heatmap_only,
+        "seed": args.seed,
+        "num_timesteps": args.num_timesteps,
+        "timestep_shift": args.timestep_shift,
+        "cfg_text_scale": args.cfg_text_scale,
+        "cfg_img_scale": args.cfg_img_scale,
+        "binary_threshold": args.binary_threshold,
+        "input_sizes": [list(image.size) for image in images],
+        "target_original_size": list(target_original.size),
+        "target_model_size": list(target_model.size),
+        "prediction_size": list(prediction.size),
+    }
+    if args.heatmap_only:
+        metadata.update(
+            cfg_interval=list(DENSE_CFG_INTERVAL),
+            cfg_renorm_min=DENSE_CFG_RENORM_MIN,
+            cfg_renorm_type=DENSE_CFG_RENORM_TYPE,
+        )
+    else:
+        metadata["target_reason"] = target_reason
+    if metadata_extra:
+        metadata.update(metadata_extra)
+    if task_metadata:
+        metadata.update(task_metadata)
+    with open(
+        os.path.join(sample_dir, "metadata.json"), "w", encoding="utf-8"
+    ) as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved inference outputs to {sample_dir}")
+    return prediction
 
 
 def run_inference(args, model_loader, metadata_extra=None):
@@ -331,90 +552,102 @@ def run_inference(args, model_loader, metadata_extra=None):
     try:
         for row_index in range(args.row_index, args.row_index + args.num_samples):
             row = load_jsonl_row(metadata_path, row_index)
-            images, image_paths, prompt, target_reason, target = prepare_sample(
-                row, args.data_dir, args.sample_type
-            )
-            prompt_suffix = args.prompt_suffix.strip()
-            if prompt_suffix:
-                prompt = f"{prompt} {prompt_suffix}"
-            generated_reason, prediction = generate_reason_heatmap(
-                inferencer=inferencer,
-                images=images,
-                prompt=prompt,
-                cfg_text_scale=args.cfg_text_scale,
-                cfg_img_scale=args.cfg_img_scale,
-                num_timesteps=args.num_timesteps,
-                timestep_shift=args.timestep_shift,
-                heatmap_only=args.heatmap_only,
-            )
-            target_original = target.copy()
-            target_model = inferencer.vae_transform.resize_transform(target)
+            if getattr(args, "two_round", False):
+                quality = args.two_round_quality
+                parent_dir = os.path.join(
+                    args.output_dir,
+                    f"{checkpoint_name}_row{row_index:04d}_{quality}_two_round",
+                )
+                round1_sample_type = f"{quality}_refine"
+                round1 = prepare_sample(
+                    row,
+                    args.data_dir,
+                    round1_sample_type,
+                    args.prompt_domain,
+                )
+                round1_dir = os.path.join(parent_dir, "round1_refine")
+                refined_image = run_and_save_task(
+                    inferencer,
+                    args,
+                    *round1,
+                    round1_sample_type,
+                    round1_dir,
+                    metadata_path,
+                    row_index,
+                    row,
+                    metadata_extra,
+                    {"two_round": True, "round": 1},
+                )
 
+                round2_sample_type = f"{quality}_verify"
+                round2 = list(
+                    prepare_sample(
+                        row,
+                        args.data_dir,
+                        round2_sample_type,
+                        args.prompt_domain,
+                    )
+                )
+                round2[0][1] = refined_image
+                round2_dir = os.path.join(parent_dir, "round2_verify")
+                round1_prediction_path = os.path.join(
+                    round1_dir, "prediction.png"
+                )
+                round2[1][1] = round1_prediction_path
+                run_and_save_task(
+                    inferencer,
+                    args,
+                    *round2,
+                    round2_sample_type,
+                    round2_dir,
+                    metadata_path,
+                    row_index,
+                    row,
+                    metadata_extra,
+                    {
+                        "two_round": True,
+                        "round": 2,
+                        "refined_image_path": round1_prediction_path,
+                    },
+                )
+                continue
+
+            (
+                images,
+                image_paths,
+                prompt,
+                target_reason,
+                target,
+                output_type,
+                target_score,
+            ) = prepare_sample(
+                row,
+                args.data_dir,
+                args.sample_type,
+                args.prompt_domain,
+            )
             sample_dir = os.path.join(
                 args.output_dir,
                 f"{checkpoint_name}_row{row_index:04d}_{args.sample_type}",
             )
-            os.makedirs(sample_dir, exist_ok=True)
-            prediction.save(os.path.join(sample_dir, "prediction_raw.png"))
-            prediction = prediction.resize(
-                images[-1].size,
-                resample=Image.Resampling.NEAREST,
+            run_and_save_task(
+                inferencer,
+                args,
+                images,
+                image_paths,
+                prompt,
+                target_reason,
+                target,
+                output_type,
+                target_score,
+                args.sample_type,
+                sample_dir,
+                metadata_path,
+                row_index,
+                row,
+                metadata_extra,
+                {"two_round": False},
             )
-            binary_prediction = to_binary_mask(
-                prediction,
-                threshold=args.binary_threshold,
-            )
-            binary_prediction.save(os.path.join(sample_dir, "prediction.png"))
-            target_original.save(os.path.join(sample_dir, "target.png"))
-            target_model.save(os.path.join(sample_dir, "target_model.png"))
-            for index, image in enumerate(images):
-                image.save(os.path.join(sample_dir, f"input_{index}.png"))
-            if generated_reason is not None:
-                with open(
-                    os.path.join(sample_dir, "reason.txt"),
-                    "w",
-                    encoding="utf-8",
-                ) as f:
-                    f.write(generated_reason)
-
-            metadata = {
-                "checkpoint_path": args.checkpoint_path,
-                "metadata_path": metadata_path,
-                "row_index": row_index,
-                "source_row_index": row.get("source_row_index"),
-                "sample_id": row.get("sample_id"),
-                "source_split": row.get("split"),
-                "sample_type": args.sample_type,
-                "image_paths": image_paths,
-                "prompt": prompt,
-                "heatmap_only": args.heatmap_only,
-                "seed": args.seed,
-                "num_timesteps": args.num_timesteps,
-                "timestep_shift": args.timestep_shift,
-                "cfg_text_scale": args.cfg_text_scale,
-                "cfg_img_scale": args.cfg_img_scale,
-                "binary_threshold": args.binary_threshold,
-                "input_sizes": [list(image.size) for image in images],
-                "target_original_size": list(target_original.size),
-                "target_model_size": list(target_model.size),
-                "prediction_size": list(prediction.size),
-            }
-            if args.heatmap_only:
-                metadata.update(
-                    cfg_interval=list(DENSE_CFG_INTERVAL),
-                    cfg_renorm_min=DENSE_CFG_RENORM_MIN,
-                    cfg_renorm_type=DENSE_CFG_RENORM_TYPE,
-                )
-            if not args.heatmap_only:
-                metadata["target_reason"] = target_reason
-            if metadata_extra:
-                metadata.update(metadata_extra)
-            with open(
-                os.path.join(sample_dir, "metadata.json"), "w", encoding="utf-8"
-            ) as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-            print(f"Saved inference outputs to {sample_dir}")
     finally:
         torch.set_default_device(default_device)
 
