@@ -53,6 +53,12 @@ SAMPLE_TYPES = (
     "good_verify",
     "bad_verify",
 )
+PERSPECTIVE_SINGLE_PROMPT = (
+    "Analyze the perspective and projection realism of this image."
+)
+PERSPECTIVE_PAIR_PROMPT = (
+    "Compare the two images and explain the perspective and projection realism difference."
+)
 LORA_VARIANTS = {
     "normal": {
         "checkpoint_path": (
@@ -207,11 +213,17 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     black_heatmap = Image.new("RGB", good_image.size)
 
     refine_prompt, verify_prompt = get_domain_prompts(prompt_domain)
+    if prompt_domain == "perspective":
+        single_prompt = PERSPECTIVE_SINGLE_PROMPT
+        pair_prompt = PERSPECTIVE_PAIR_PROMPT
+    else:
+        single_prompt = SANITY_PATCH_PROMPT
+        pair_prompt = SANITY_PATCH_PROMPT
 
     if sample_type == "good":
         image_paths = [good_image_path]
         images = [good_image]
-        prompt = SANITY_PATCH_PROMPT
+        prompt = single_prompt
         reason = row["good_reason"]
         target = black_heatmap
         output_type = "heatmap"
@@ -219,7 +231,7 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     elif sample_type == "bad":
         image_paths = [bad_image_path]
         images = [bad_image]
-        prompt = SANITY_PATCH_PROMPT
+        prompt = single_prompt
         reason = row["bad_reason"]
         target = bad_heatmap
         output_type = "heatmap"
@@ -227,7 +239,7 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     elif sample_type == "pair":
         image_paths = [good_image_path, bad_image_path]
         images = [good_image, bad_image]
-        prompt = SANITY_PATCH_PROMPT
+        prompt = pair_prompt
         reason = row["pair_reason"]
         target = bad_heatmap
         output_type = "heatmap"
