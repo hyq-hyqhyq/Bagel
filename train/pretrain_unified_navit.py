@@ -223,6 +223,24 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Enable multimodal scalar score regression."}
     )
+    split_gen_adapter_by_task: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use separate repair and heatmap VAE-to-LLM and LLM-to-VAE "
+                "generation adapters."
+            )
+        },
+    )
+    gen_task_filter: str = field(
+        default="joint",
+        metadata={
+            "help": (
+                "Generation task data to train: joint, repair, or heatmap. "
+                "Single-task modes require split_gen_adapter_by_task=True."
+            )
+        },
+    )
 
     # --- bookkeeping & logging ---
     results_dir: str = field(
@@ -445,6 +463,17 @@ def main(
         (model_arguments, data_arguments, training_arguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    if training_args.gen_task_filter not in ("joint", "repair", "heatmap"):
+        raise ValueError(
+            "gen_task_filter must be one of: joint, repair, heatmap"
+        )
+    if (
+        training_args.gen_task_filter != "joint"
+        and not training_args.split_gen_adapter_by_task
+    ):
+        raise ValueError(
+            "gen_task_filter requires split_gen_adapter_by_task=True"
+        )
     if training_args.peak_device_tflops <= 0:
         auto_tflops = detect_peak_tflops(training_args.peak_device_tflops)
         if auto_tflops > 0:
@@ -564,6 +593,7 @@ def main(
         interpolate_pos=model_args.interpolate_pos,
         timestep_shift=training_args.timestep_shift,
         score_head=training_args.score_head,
+        split_gen_adapter_by_task=training_args.split_gen_adapter_by_task,
     )
     model = Bagel(
         language_model, 
@@ -598,6 +628,18 @@ def main(
     if training_args.freeze_vit and training_args.visual_und:
         model.vit_model.eval()
         for param in model.vit_model.parameters():
+            param.requires_grad = False
+    if (
+        training_args.split_gen_adapter_by_task
+        and training_args.gen_task_filter != "joint"
+    ):
+        inactive_task = (
+            "heatmap"
+            if training_args.gen_task_filter == "repair"
+            else "repair"
+        )
+        inactive_adapter = getattr(model, f"{inactive_task}_gen_adapter")
+        for param in inactive_adapter.parameters():
             param.requires_grad = False
 
     # Setup FSDP and load pretrained model:
@@ -704,6 +746,8 @@ def main(
         prefer_buffer_before=data_args.prefer_buffer_before,
         interpolate_pos=model_args.interpolate_pos,
         use_flex=training_args.use_flex,
+        split_gen_adapter_by_task=training_args.split_gen_adapter_by_task,
+        gen_task_filter=training_args.gen_task_filter,
         data_status=data_status,
     )
     train_dataset.set_epoch(data_args.data_seed)

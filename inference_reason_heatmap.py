@@ -111,13 +111,20 @@ def parse_args():
 
 def build_model(model_path, checkpoint_path, device):
     with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+        checkpoint_keys = tuple(f.keys())
         score_head = any(
             key.startswith("score_head.") or ".score_head." in key
-            for key in f.keys()
+            for key in checkpoint_keys
+        )
+        split_gen_adapter_by_task = any(
+            "repair_gen_adapter." in key
+            or "heatmap_gen_adapter." in key
+            for key in checkpoint_keys
         )
     model, vae_model = build_model_architecture(
         model_path,
         score_head=score_head,
+        split_gen_adapter_by_task=split_gen_adapter_by_task,
     )
     model = load_checkpoint_and_dispatch(
         model,

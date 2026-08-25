@@ -282,7 +282,9 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     return images, image_paths, prompt, reason, target, output_type, target_score
 
 
-def build_model_architecture(model_path, score_head=False):
+def build_model_architecture(
+    model_path, score_head=False, split_gen_adapter_by_task=False
+):
     llm_config = Qwen2Config.from_json_file(os.path.join(model_path, "llm_config.json"))
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
@@ -304,6 +306,7 @@ def build_model_architecture(model_path, score_head=False):
         latent_patch_size=2,
         max_latent_size=64,
         score_head=score_head,
+        split_gen_adapter_by_task=split_gen_adapter_by_task,
     )
 
     with init_empty_weights():
@@ -382,6 +385,7 @@ def generate_reason_heatmap(
     cfg_img_scale,
     num_timesteps,
     timestep_shift,
+    gen_task,
     heatmap_only=False,
 ):
     dense_kwargs = {}
@@ -398,6 +402,7 @@ def generate_reason_heatmap(
         cfg_img_scale=cfg_img_scale,
         timestep_shift=timestep_shift,
         num_timesteps=num_timesteps,
+        gen_task=gen_task,
         **dense_kwargs,
     )
     generated_reason = next(
@@ -432,6 +437,7 @@ def run_and_save_task(
     prompt_suffix = args.prompt_suffix.strip()
     if prompt_suffix:
         prompt = f"{prompt} {prompt_suffix}"
+    gen_task = "heatmap" if output_type == "heatmap" else "repair"
     generated_reason, predicted_score, prediction_raw = generate_reason_heatmap(
         inferencer=inferencer,
         images=images,
@@ -440,6 +446,7 @@ def run_and_save_task(
         cfg_img_scale=args.cfg_img_scale,
         num_timesteps=args.num_timesteps,
         timestep_shift=args.timestep_shift,
+        gen_task=gen_task,
         heatmap_only=args.heatmap_only,
     )
     target_original = target.copy()
@@ -490,6 +497,7 @@ def run_and_save_task(
         "sample_type": sample_type,
         "prompt_domain": args.prompt_domain,
         "output_type": output_type,
+        "gen_task": gen_task,
         "predicted_score": predicted_score,
         "target_score": target_score,
         "image_paths": image_paths,

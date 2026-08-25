@@ -82,6 +82,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["good_reason"],
                     black_heatmap,
                     row.get("good_score", 1.0),
+                    "heatmap",
                 ),
                 (
                     [bad_image],
@@ -89,6 +90,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["bad_reason"],
                     bad_heatmap,
                     row.get("bad_score", 0.0),
+                    "heatmap",
                 ),
                 (
                     [good_image, bad_image],
@@ -96,6 +98,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["pair_reason"],
                     bad_heatmap,
                     row.get("pair_score"),
+                    "heatmap",
                 ),
             ]
         else:
@@ -106,6 +109,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["good_reason"],
                     good_image,
                     row.get("good_score", 1.0),
+                    "repair",
                 ),
                 (
                     [bad_image],
@@ -113,6 +117,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["bad_reason"],
                     good_image,
                     row.get("bad_score", 0.0),
+                    "repair",
                 ),
                 (
                     [good_image, good_image],
@@ -120,6 +125,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["good_reason"],
                     black_heatmap,
                     row.get("good_score", 1.0),
+                    "heatmap",
                 ),
                 (
                     [bad_image, good_image],
@@ -127,11 +133,12 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
                     row["bad_reason"],
                     bad_heatmap,
                     row.get("bad_score", 0.0),
+                    "heatmap",
                 ),
             ]
 
         samples = []
-        for input_images, prompt, reason, target_image, score_label in task_specs:
+        for input_images, prompt, reason, target_image, score_label, gen_task in task_specs:
             data = self._init_data()
             for input_image in input_images:
                 data = self._add_image(
@@ -158,6 +165,7 @@ class SanityPatchIterableDataset(InterleavedBaseIterableDataset):
             )
             if score_label is not None:
                 data["score_label"] = float(score_label)
+            data["gen_task"] = gen_task
             samples.append(data)
         return samples
 

@@ -217,6 +217,14 @@ class FSDPCheckpoint:
             else:
                 model_state_dict_path = os.path.join(resume_from, f"model.safetensors")
             model_state_dict = load_file(model_state_dict_path, device="cpu")
+            if (
+                getattr(model.config, "split_gen_adapter_by_task", False)
+                and "vae2llm.weight" in model_state_dict
+            ):
+                logger.info(
+                    "Migrating legacy vae2llm/llm2vae weights into both "
+                    "repair and heatmap generation adapters."
+                )
             # NOTE position embeds are fixed sinusoidal embeddings, so we can just pop it off,
             # which makes it easier to adapt to different resolutions.
             model_state_dict.pop('latent_pos_embed.pos_embed')

@@ -40,6 +40,7 @@ class BagelConfig(PretrainedConfig):
         timestep_shift=1.0,
         score_head=False,
         score_head_hidden_size=256,
+        split_gen_adapter_by_task=False,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -56,6 +57,14 @@ class BagelConfig(PretrainedConfig):
         self.timestep_shift = timestep_shift
         self.score_head = score_head
         self.score_head_hidden_size = score_head_hidden_size
+        self.split_gen_adapter_by_task = split_gen_adapter_by_task
+
+
+class GenerationAdapter(nn.Module):
+    def __init__(self, patch_latent_dim, hidden_size):
+        super().__init__()
+        self.vae2llm = nn.Linear(patch_latent_dim, hidden_size)
+        self.llm2vae = nn.Linear(hidden_size, patch_latent_dim)
 
 
 class Bagel(PreTrainedModel):
@@ -77,8 +86,16 @@ class Bagel(PreTrainedModel):
             self.latent_channel = config.vae_config.z_channels
             self.patch_latent_dim = self.latent_patch_size ** 2 * self.latent_channel
             self.time_embedder = TimestepEmbedder(self.hidden_size)
-            self.vae2llm = nn.Linear(self.patch_latent_dim, self.hidden_size)
-            self.llm2vae = nn.Linear(self.hidden_size, self.patch_latent_dim)
+            if config.split_gen_adapter_by_task:
+                self.repair_gen_adapter = GenerationAdapter(
+                    self.patch_latent_dim, self.hidden_size
+                )
+                self.heatmap_gen_adapter = GenerationAdapter(
+                    self.patch_latent_dim, self.hidden_size
+                )
+            else:
+                self.vae2llm = nn.Linear(self.patch_latent_dim, self.hidden_size)
+                self.llm2vae = nn.Linear(self.hidden_size, self.patch_latent_dim)
             self.latent_pos_embed = PositionEmbedding(self.max_latent_size, self.hidden_size)
 
         if config.visual_und:
@@ -113,8 +130,63 @@ class Bagel(PreTrainedModel):
 
     def _init_weights(self):
         if self.config.visual_gen:
-            nn.init.constant_(self.llm2vae.weight, 0)
-            nn.init.constant_(self.llm2vae.bias, 0)
+            if self.config.split_gen_adapter_by_task:
+                adapters = (
+                    self.repair_gen_adapter,
+                    self.heatmap_gen_adapter,
+                )
+                for adapter in adapters:
+                    nn.init.constant_(adapter.llm2vae.weight, 0)
+                    nn.init.constant_(adapter.llm2vae.bias, 0)
+            else:
+                nn.init.constant_(self.llm2vae.weight, 0)
+                nn.init.constant_(self.llm2vae.bias, 0)
+
+    def _get_generation_adapter(self, gen_task):
+        if not self.config.split_gen_adapter_by_task:
+            return self.vae2llm, self.llm2vae
+        if gen_task not in ("repair", "heatmap"):
+            raise ValueError(
+                "A split generation model requires explicit gen_task='repair' "
+                "or gen_task='heatmap'"
+            )
+        adapter = getattr(self, f"{gen_task}_gen_adapter")
+        return adapter.vae2llm, adapter.llm2vae
+
+    def _migrate_generation_adapter_state_dict(self, state_dict):
+        if not self.config.split_gen_adapter_by_task:
+            return state_dict
+
+        migrated = state_dict.copy()
+        legacy_keys = [
+            key for key in state_dict
+            if "_gen_adapter." not in key
+            and key.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+            in ("vae2llm", "llm2vae")
+        ]
+        for legacy_key in legacy_keys:
+            module_path, parameter_name = legacy_key.rsplit(".", 1)
+            prefix, legacy_module = (
+                module_path.rsplit(".", 1)
+                if "." in module_path
+                else ("", module_path)
+            )
+            for gen_task in ("repair", "heatmap"):
+                adapter_path = f"{gen_task}_gen_adapter.{legacy_module}"
+                new_key = (
+                    f"{prefix}.{adapter_path}.{parameter_name}"
+                    if prefix
+                    else f"{adapter_path}.{parameter_name}"
+                )
+                migrated.setdefault(new_key, state_dict[legacy_key].clone())
+            migrated.pop(legacy_key, None)
+        return migrated
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        state_dict = self._migrate_generation_adapter_state_dict(state_dict)
+        return super().load_state_dict(
+            state_dict, strict=strict, assign=assign
+        )
 
     @staticmethod
     def _scatter_mean(hidden_states, token_indexes, sample_ids, num_samples):
@@ -152,6 +224,7 @@ class Bagel(PreTrainedModel):
         packed_vae_token_indexes: Optional[torch.LongTensor] = None,
         packed_timesteps: Optional[torch.LongTensor] = None,
         mse_loss_indexes: Optional[torch.BoolTensor] = None,
+        gen_task: Optional[str] = None,
         # for score regression
         score_token_indexes: Optional[torch.LongTensor] = None,
         score_labels: Optional[torch.Tensor] = None,
@@ -239,6 +312,7 @@ class Bagel(PreTrainedModel):
                 packed_sequence = packed_sequence + dummy_out.sum() * 0
 
         if self.config.visual_gen:
+            vae2llm, llm2vae = self._get_generation_adapter(gen_task)
             p = self.latent_patch_size
             packed_latent = []
             for latent, (h, w) in zip(padded_latent, patchified_vae_latent_shapes):
@@ -253,7 +327,7 @@ class Bagel(PreTrainedModel):
             packed_latent = (1 - packed_timesteps[:, None]) * packed_latent_clean + packed_timesteps[:, None] * noise
             packed_timestep_embeds = self.time_embedder(packed_timesteps)
             latent_token_pos_emb = self.latent_pos_embed(packed_latent_position_ids)
-            packed_latent = self.vae2llm(packed_latent) + packed_timestep_embeds + latent_token_pos_emb
+            packed_latent = vae2llm(packed_latent) + packed_timestep_embeds + latent_token_pos_emb
             packed_sequence[packed_vae_token_indexes] = packed_latent
 
         extra_inputs = {}
@@ -315,7 +389,7 @@ class Bagel(PreTrainedModel):
             else:
                 has_mse_loss = True
                 target = noise - packed_latent_clean # NOTE: v_t=dx_t/dt=x_1-x_0, pointing from data to noise
-            packed_mse_preds = self.llm2vae(last_hidden_state[mse_loss_indexes])
+            packed_mse_preds = llm2vae(last_hidden_state[mse_loss_indexes])
             has_mse = packed_timesteps > 0
             mse = (packed_mse_preds - target[has_mse]) ** 2
 
@@ -618,7 +692,9 @@ class Bagel(PreTrainedModel):
         key_values_lens: torch.IntTensor,
         packed_key_value_indexes: torch.Tensor,
         return_hidden: bool = False,
+        gen_task: Optional[str] = None,
     ):
+        vae2llm, _ = self._get_generation_adapter(gen_task)
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
@@ -634,7 +710,7 @@ class Bagel(PreTrainedModel):
         packed_latent = torch.cat(packed_latent, dim=0)
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_timestep_embeds = self.time_embedder(packed_timesteps)
-        packed_latent = self.vae2llm(packed_latent) + packed_timestep_embeds + packed_pos_embed
+        packed_latent = vae2llm(packed_latent) + packed_timestep_embeds + packed_pos_embed
         if packed_latent.dtype != packed_sequence.dtype:
             packed_latent = packed_latent.to(packed_sequence.dtype)
         packed_sequence[packed_vae_token_indexes] = packed_latent
@@ -770,6 +846,7 @@ class Bagel(PreTrainedModel):
         past_key_values: NaiveCache,
         key_values_lens: torch.IntTensor,
         packed_key_value_indexes: torch.LongTensor,
+        gen_task: Optional[str] = None,
         num_timesteps: int = 24,
         timestep_shift: float = 1.0,
         cfg_renorm_min: float = 0.0,
@@ -823,6 +900,7 @@ class Bagel(PreTrainedModel):
             v_t = self._forward_flow(
                 x_t=x_t,
                 timestep=timestep, 
+                gen_task=gen_task,
                 packed_vae_token_indexes=packed_vae_token_indexes,
                 packed_vae_position_ids=packed_vae_position_ids,
                 packed_text_ids=packed_text_ids,
@@ -874,6 +952,7 @@ class Bagel(PreTrainedModel):
         self,
         x_t: torch.Tensor,
         timestep: torch.LongTensor,
+        gen_task: Optional[str],
         packed_vae_token_indexes: torch.LongTensor,
         packed_vae_position_ids: torch.LongTensor,
         packed_text_ids: torch.LongTensor,
@@ -909,6 +988,7 @@ class Bagel(PreTrainedModel):
         model_pred_img_cache_dic: Optional[Dict[str, Any]] = None,
         model_pred_img_current: Optional[int] = None,
     ):
+        vae2llm, llm2vae = self._get_generation_adapter(gen_task)
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
@@ -916,7 +996,7 @@ class Bagel(PreTrainedModel):
         assert timestep.unique().shape[0] == 1
         packed_pos_embed = self.latent_pos_embed(packed_vae_position_ids)
         packed_timestep_embeds = self.time_embedder(timestep)
-        x_t = self.vae2llm(x_t) + packed_timestep_embeds + packed_pos_embed
+        x_t = vae2llm(x_t) + packed_timestep_embeds + packed_pos_embed
         if x_t.dtype != packed_sequence.dtype:
             x_t = x_t.to(packed_sequence.dtype)
         packed_sequence[packed_vae_token_indexes] = x_t
@@ -945,7 +1025,7 @@ class Bagel(PreTrainedModel):
             is_causal=False,
             **extra_inputs,
         )
-        v_t = self.llm2vae(output.packed_query_sequence)
+        v_t = llm2vae(output.packed_query_sequence)
         v_t = v_t[packed_vae_token_indexes]
 
         if cfg_text_scale > 1.0:
@@ -964,7 +1044,7 @@ class Bagel(PreTrainedModel):
                 is_causal=False,
                 **extra_inputs,
             )
-            cfg_text_v_t = self.llm2vae(cfg_text_output.packed_query_sequence)
+            cfg_text_v_t = llm2vae(cfg_text_output.packed_query_sequence)
             cfg_text_v_t = cfg_text_v_t[packed_vae_token_indexes]
 
         if cfg_img_scale > 1.0:
@@ -983,7 +1063,7 @@ class Bagel(PreTrainedModel):
                 is_causal=False,
                 **extra_inputs,
             )
-            cfg_img_v_t = self.llm2vae(cfg_img_output.packed_query_sequence)
+            cfg_img_v_t = llm2vae(cfg_img_output.packed_query_sequence)
             cfg_img_v_t = cfg_img_v_t[packed_vae_token_indexes]
 
         if cfg_text_scale > 1.0:

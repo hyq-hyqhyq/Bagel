@@ -58,6 +58,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
         max_buffer_size=50,
         interpolate_pos=False,
         use_flex=False,
+        split_gen_adapter_by_task=False,
+        gen_task_filter="joint",
         data_status=None,
     ):
         super().__init__()
@@ -71,6 +73,16 @@ class PackedDataset(torch.utils.data.IterableDataset):
         self.world_size = world_size
         self.num_workers = num_workers
         self.use_flex = use_flex
+        self.split_gen_adapter_by_task = split_gen_adapter_by_task
+        self.gen_task_filter = gen_task_filter
+        if self.gen_task_filter not in ("joint", "repair", "heatmap"):
+            raise ValueError(
+                "gen_task_filter must be one of: joint, repair, heatmap"
+            )
+        if not self.split_gen_adapter_by_task and self.gen_task_filter != "joint":
+            raise ValueError(
+                "gen_task_filter requires split_gen_adapter_by_task=True"
+            )
         for k, v in special_tokens.items():
             setattr(self, k, v)
 
@@ -187,8 +199,30 @@ class PackedDataset(torch.utils.data.IterableDataset):
             score_vae_sample_ids        = list(),
             score_vit_token_indexes     = list(),
             score_vit_sample_ids        = list(),
+            gen_task                    = None,
         )
         return sequence_status
+
+    def _sample_gen_task(self, sample):
+        if not self.split_gen_adapter_by_task:
+            return None
+        gen_task = sample.get("gen_task")
+        if gen_task not in ("repair", "heatmap"):
+            raise ValueError(
+                "split_gen_adapter_by_task=True requires every sample to set "
+                "gen_task to 'repair' or 'heatmap'"
+            )
+        return gen_task
+
+    def _sample_is_enabled(self, sample):
+        gen_task = self._sample_gen_task(sample)
+        return self.gen_task_filter == "joint" or gen_task == self.gen_task_filter
+
+    def _next_enabled_sample(self, dataset_iter):
+        while True:
+            sample = next(dataset_iter)
+            if self._sample_is_enabled(sample):
+                return sample
 
     def to_tensor(self, sequence_status):
         data = dict(
@@ -198,6 +232,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
             packed_text_indexes=torch.tensor(sequence_status['packed_text_indexes']),
             packed_position_ids=torch.tensor(sequence_status['packed_position_ids']),
         )
+        if sequence_status['gen_task'] is not None:
+            data['gen_task'] = sequence_status['gen_task']
         if not self.use_flex:
             data['nested_attention_masks'] = sequence_status['nested_attention_masks']
         else:
@@ -268,22 +304,48 @@ class PackedDataset(torch.utils.data.IterableDataset):
         batch_data_indexes = []
 
         buffer = []
+        pending_sample = None
         while True:
+            if sequence_status['curr'] == 0 and pending_sample is not None:
+                sequence_status = self.pack_sequence(
+                    pending_sample, sequence_status
+                )
+                batch_data_indexes.append(pending_sample['data_indexes'])
+                pending_sample = None
+
             # Ensure at least one sample from each group
             if sequence_status['curr'] == 0:
                 for group_index, group_iter in enumerate(self.dataset_iters):
                     if self.is_mandatory[group_index]:
                         while True:
-                            sample = next(group_iter)
+                            sample = self._next_enabled_sample(group_iter)
                             # if a sample is too long, skip it
                             num_tokens = sample['num_tokens'] + 2 * len(sample['sequence_plan'])
                             if num_tokens < self.max_num_tokens_per_sample:
+                                sample_gen_task = self._sample_gen_task(sample)
+                                if (
+                                    sequence_status['gen_task'] is not None
+                                    and sample_gen_task
+                                    != sequence_status['gen_task']
+                                ):
+                                    pending_sample = sample
+                                    break
                                 sequence_status = self.pack_sequence(sample, sequence_status)
                                 batch_data_indexes.append(sample['data_indexes'])
                                 break
                             else:
                                 print(f"skip a sample with length {num_tokens}")
                                 continue
+                    if pending_sample is not None:
+                        break
+
+            if pending_sample is not None:
+                data = self.to_tensor(sequence_status)
+                data['batch_data_indexes'] = batch_data_indexes
+                yield data
+                sequence_status = self.set_sequence_status()
+                batch_data_indexes = []
+                continue
 
             if sequence_status['curr'] < self.prefer_buffer_before and len(buffer) > 0:
                 sample = buffer.pop(0)
@@ -296,8 +358,23 @@ class PackedDataset(torch.utils.data.IterableDataset):
                     if n < cumprob:
                         group_index = i
                         break
-                sample = next(self.dataset_iters[group_index])
+                sample = self._next_enabled_sample(
+                    self.dataset_iters[group_index]
+                )
                 sample_from_buffer = False
+
+            sample_gen_task = self._sample_gen_task(sample)
+            if (
+                sequence_status['gen_task'] is not None
+                and sample_gen_task != sequence_status['gen_task']
+            ):
+                pending_sample = sample
+                data = self.to_tensor(sequence_status)
+                data['batch_data_indexes'] = batch_data_indexes
+                yield data
+                sequence_status = self.set_sequence_status()
+                batch_data_indexes = []
+                continue
 
             # if a sample is too long, skip it
             num_tokens = sample['num_tokens'] + 2 * len(sample['sequence_plan'])
@@ -328,6 +405,15 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 batch_data_indexes = []
 
     def pack_sequence(self, sample, sequence_status):
+        sample_gen_task = self._sample_gen_task(sample)
+        if sample_gen_task is not None:
+            if sequence_status['gen_task'] is None:
+                sequence_status['gen_task'] = sample_gen_task
+            elif sequence_status['gen_task'] != sample_gen_task:
+                raise ValueError(
+                    "A packed batch cannot mix repair and heatmap gen_task values"
+                )
+
         image_tensor_list = sample['image_tensor_list']
         text_ids_list = sample['text_ids_list']
         sequence_plan = sample['sequence_plan']
@@ -527,6 +613,7 @@ class SimpleCustomBatch:
         self.packed_text_ids = data["packed_text_ids"]
         self.packed_text_indexes = data["packed_text_indexes"]
         self.packed_position_ids = data["packed_position_ids"]
+        self.gen_task = data.get("gen_task")
 
         self.use_flex = "nested_attention_masks" not in data.keys()
 
@@ -650,6 +737,8 @@ class SimpleCustomBatch:
             packed_position_ids = self.packed_position_ids,
             batch_data_indexes = self.batch_data_indexes,
         )
+        if self.gen_task is not None:
+            data['gen_task'] = self.gen_task
 
         if not self.use_flex:
             data['nested_attention_masks'] = self.nested_attention_masks

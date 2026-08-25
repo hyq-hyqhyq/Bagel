@@ -69,7 +69,9 @@ class InterleaveInferencer:
         return gen_context
 
     @torch.no_grad()
-    def update_context_image(self, image, gen_context, vae=True, vit=True):
+    def update_context_image(
+        self, image, gen_context, vae=True, vit=True, gen_task=None
+    ):
         # used for interleave data, currently only support 1 data inference, 
 
         assert vae or vit
@@ -90,6 +92,7 @@ class InterleaveInferencer:
                 self.vae_model,
                 past_key_values,
                 return_hidden=True,
+                gen_task=gen_task,
                 **generation_input,
             )
             vae_hidden = hidden_states[generation_input['packed_vae_token_indexes']]
@@ -166,6 +169,7 @@ class InterleaveInferencer:
         num_timesteps=50, 
         timestep_shift=3.0,
         enable_taylorseer=False,
+        gen_task=None,
     ):
         # print(cfg_renorm_type)
         past_key_values = gen_context['past_key_values']
@@ -219,6 +223,7 @@ class InterleaveInferencer:
             cfg_img_key_values_lens=generation_input_cfg_img['cfg_key_values_lens'],
             cfg_img_packed_key_value_indexes=generation_input_cfg_img['cfg_packed_key_value_indexes'],
             enable_taylorseer=enable_taylorseer,
+            gen_task=gen_task,
         )
 
         image = self.decode_image(unpacked_latent[0], image_shape)
@@ -277,6 +282,7 @@ class InterleaveInferencer:
         cfg_renorm_type="global",
         image_shapes=(1024, 1024),
         enable_taylorseer=False,
+        gen_task=None,
     ) -> List[Union[str, Image.Image]]:
 
         output_list = []
@@ -301,7 +307,12 @@ class InterleaveInferencer:
 
                 elif isinstance(input_term, Image.Image):
                     input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
-                    gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
+                    gen_context = self.update_context_image(
+                        input_term,
+                        gen_context,
+                        vae=not understanding_output,
+                        gen_task=gen_task,
+                    )
 
                     image_shapes = input_term.size[::-1]
                     cfg_text_context = deepcopy(gen_context)
@@ -337,6 +348,7 @@ class InterleaveInferencer:
                     cfg_renorm_min=cfg_renorm_min,
                     cfg_renorm_type=cfg_renorm_type,
                     enable_taylorseer=enable_taylorseer,
+                    gen_task=gen_task,
                 )
 
                 output_list.append(img)
