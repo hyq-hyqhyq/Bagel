@@ -71,6 +71,8 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --timestep_shift 4.0 \
   --ce_weight 0.25 \
   --mse_weight 10 \
+  --repair_mse_weight 1 \
+  --heatmap_mse_weight 10 \
   --score_weight 1.0 \
   --use_flex True \
   --num_shard 4 \

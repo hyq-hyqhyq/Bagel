@@ -364,7 +364,15 @@ class TrainingArguments:
     )
     mse_weight: float = field(
         default=1.0,
-        metadata={"help": "Scaling factor for the image-reconstruction MSE loss term."}
+        metadata={"help": "Fallback scaling factor for image MSE when task-specific weights are unset."}
+    )
+    repair_mse_weight: Optional[float] = field(
+        default=None,
+        metadata={"help": "Scaling factor for repair image MSE; defaults to mse_weight."}
+    )
+    heatmap_mse_weight: Optional[float] = field(
+        default=None,
+        metadata={"help": "Scaling factor for heatmap image MSE; defaults to mse_weight."}
     )
     ce_weight: float = field(
         default=1.0,
@@ -844,7 +852,55 @@ def main(
                     / total_mse_tokens
                 )
                 loss_dict["mse"] = mse.detach()
-                loss = loss + mse * training_args.mse_weight
+                repair_mse_weight = (
+                    training_args.mse_weight
+                    if training_args.repair_mse_weight is None
+                    else training_args.repair_mse_weight
+                )
+                heatmap_mse_weight = (
+                    training_args.mse_weight
+                    if training_args.heatmap_mse_weight is None
+                    else training_args.heatmap_mse_weight
+                )
+                use_task_specific_mse_weights = (
+                    training_args.repair_mse_weight is not None
+                    or training_args.heatmap_mse_weight is not None
+                )
+                if use_task_specific_mse_weights:
+                    if mse_task_labels is None or mse_per_token is None:
+                        raise ValueError(
+                            "Task-specific MSE weights require generation task labels"
+                        )
+                    per_token_mse = mse_per_token.mean(dim=-1)
+                    if len(mse_task_labels) != len(per_token_mse):
+                        raise ValueError(
+                            "mse_task_labels must contain one label per generation token"
+                        )
+                    repair_mask = (mse_task_labels == 0) | (mse_task_labels == 1)
+                    heatmap_mask = (mse_task_labels == 2) | (mse_task_labels == 3)
+                    if not torch.all(repair_mask | heatmap_mask):
+                        raise ValueError("Unknown generation task label in mse_task_labels")
+                    token_weights = torch.where(
+                        repair_mask,
+                        per_token_mse.new_tensor(repair_mse_weight),
+                        per_token_mse.new_tensor(heatmap_mse_weight),
+                    )
+                    weighted_mse_sum = (per_token_mse * token_weights).sum()
+                    weighted_mse = (
+                        weighted_mse_sum
+                        * mse_group_size.item()
+                        / total_mse_tokens
+                    )
+                    weighted_mse_log_sum = weighted_mse_sum.detach().clone()
+                    dist.all_reduce(weighted_mse_log_sum, op=dist.ReduceOp.SUM)
+                    loss_dict["weighted_mse"] = (
+                        weighted_mse_log_sum / total_mse_tokens
+                    )
+                    loss = loss + weighted_mse
+                else:
+                    weighted_mse = mse * training_args.mse_weight
+                    loss_dict["weighted_mse"] = weighted_mse.detach()
+                    loss = loss + weighted_mse
                 if mse_task_labels is not None:
                     task_names = ("good_repair", "bad_repair", "good_heatmap", "bad_heatmap")
                     for task_id, task_name in enumerate(task_names):
