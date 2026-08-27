@@ -804,7 +804,9 @@ def main(
                     torch.cuda.empty_cache()
                 raise e
         
-        loss = 0
+            loss = 0
+            mse_task_labels = loss_dict.pop("mse_task_labels", None)
+            mse_per_token = loss_dict.pop("mse_per_token", None)
         loss_dict.pop("score", None)
         ce = loss_dict["ce"]
         ce_group_size = torch.tensor(int(loss_dict.pop("has_ce")), device=device)
@@ -843,6 +845,22 @@ def main(
                 )
                 loss_dict["mse"] = mse.detach()
                 loss = loss + mse * training_args.mse_weight
+                if mse_task_labels is not None:
+                    task_names = ("good_repair", "bad_repair", "good_heatmap", "bad_heatmap")
+                    for task_id, task_name in enumerate(task_names):
+                        task_mask = mse_task_labels == task_id
+                        task_count = torch.tensor(int(task_mask.sum()), device=device)
+                        dist.all_reduce(task_count, op=dist.ReduceOp.SUM)
+                        if task_count.item() > 0:
+                            task_mse = mse.new_tensor(0.0)
+                            # mse is already reduced globally; compute per-task from raw tensor below when available.
+                            if mse_per_token is not None:
+                                task_sum = mse_per_token[task_mask].mean(dim=-1).sum()
+                                dist.all_reduce(task_sum, op=dist.ReduceOp.SUM)
+                                task_mse = task_sum / task_count
+                            loss_dict[f"mse_{task_name}"] = task_mse.detach()
+                        else:
+                            loss_dict[f"mse_{task_name}"] = torch.tensor(0.0, device=device)
             else:
                 loss_dict["mse"] = torch.tensor(0.0, device=device)
                 total_mse_tokens = torch.tensor(0, device=device)

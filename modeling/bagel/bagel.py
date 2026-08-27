@@ -224,6 +224,7 @@ class Bagel(PreTrainedModel):
         packed_vae_token_indexes: Optional[torch.LongTensor] = None,
         packed_timesteps: Optional[torch.LongTensor] = None,
         mse_loss_indexes: Optional[torch.BoolTensor] = None,
+        mse_task_labels: Optional[torch.LongTensor] = None,
         gen_task: Optional[str] = None,
         # for score regression
         score_token_indexes: Optional[torch.LongTensor] = None,
@@ -402,6 +403,8 @@ class Bagel(PreTrainedModel):
 
         return dict(
             mse=mse,
+            mse_per_token=mse,
+            mse_task_labels=mse_task_labels,
             ce=ce,
             score_mse=score_mse,
             score=score_preds,

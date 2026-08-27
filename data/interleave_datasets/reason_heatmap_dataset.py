@@ -168,6 +168,7 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
             if score_label is not None:
                 data["score_label"] = float(score_label)
             data["gen_task"] = gen_task
+            data["gen_quality"] = "good" if reason == row["good_reason"] else "bad"
             samples.append(data)
         return samples
 

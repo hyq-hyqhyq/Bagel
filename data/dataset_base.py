@@ -189,6 +189,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             packed_vae_token_indexes    = list(), 
             packed_timesteps            = list(), 
             mse_loss_indexes            = list(),
+            mse_task_labels             = list(),
             packed_vit_tokens           = list(), 
             vit_token_seqlens           = list(),
             packed_vit_position_ids     = list(),
@@ -268,6 +269,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
         if len(sequence_status['packed_timesteps']) > 0:
             data['packed_timesteps'] = torch.tensor(sequence_status['packed_timesteps'])
             data['mse_loss_indexes'] = torch.tensor(sequence_status['mse_loss_indexes'])
+            data['mse_task_labels'] = torch.tensor(sequence_status['mse_task_labels'], dtype=torch.long)
 
         # if the model is required to perform text generation
         if len(sequence_status['packed_label_ids']) > 0:
@@ -417,6 +419,13 @@ class PackedDataset(torch.utils.data.IterableDataset):
         image_tensor_list = sample['image_tensor_list']
         text_ids_list = sample['text_ids_list']
         sequence_plan = sample['sequence_plan']
+        gen_quality = sample.get('gen_quality')
+        mse_task_label = {
+            ("repair", "good"): 0,
+            ("repair", "bad"): 1,
+            ("heatmap", "good"): 2,
+            ("heatmap", "bad"): 3,
+        }.get((sample_gen_task, gen_quality), -1)
 
         split_lens, attn_modes = list(), list()
         curr = sequence_status['curr']
@@ -540,6 +549,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 sequence_status['packed_vae_token_indexes'].extend(range(curr, curr + num_img_tokens))
                 if item['loss'] == 1:
                     sequence_status['mse_loss_indexes'].extend(range(curr, curr + num_img_tokens))
+                    sequence_status['mse_task_labels'].extend([mse_task_label] * num_img_tokens)
                     if split_start:
                         timestep = np.random.randn()
                 else:
@@ -638,6 +648,7 @@ class SimpleCustomBatch:
         if "packed_timesteps" in data.keys():
             self.packed_timesteps = data["packed_timesteps"]
             self.mse_loss_indexes = data["mse_loss_indexes"]
+            self.mse_task_labels = data["mse_task_labels"]
 
         if "packed_label_ids" in data.keys():
             self.packed_label_ids = data["packed_label_ids"]
@@ -668,6 +679,7 @@ class SimpleCustomBatch:
         if hasattr(self, 'packed_timesteps'):
             self.packed_timesteps = self.packed_timesteps.pin_memory()
             self.mse_loss_indexes = self.mse_loss_indexes.pin_memory()
+            self.mse_task_labels = self.mse_task_labels.pin_memory()
 
         if hasattr(self, 'packed_vit_tokens'):
             self.packed_vit_tokens = self.packed_vit_tokens.pin_memory()
@@ -706,6 +718,7 @@ class SimpleCustomBatch:
         if hasattr(self, 'packed_timesteps'):
             self.packed_timesteps = self.packed_timesteps.to(device)
             self.mse_loss_indexes = self.mse_loss_indexes.to(device)
+            self.mse_task_labels = self.mse_task_labels.to(device)
 
         if hasattr(self, 'packed_vit_tokens'):
             self.packed_vit_tokens = self.packed_vit_tokens.to(device)
@@ -761,6 +774,7 @@ class SimpleCustomBatch:
         if hasattr(self, 'packed_timesteps'):
             data['packed_timesteps'] = self.packed_timesteps
             data['mse_loss_indexes'] = self.mse_loss_indexes
+            data['mse_task_labels'] = self.mse_task_labels
 
         if hasattr(self, 'packed_label_ids'):
             data['packed_label_ids'] = self.packed_label_ids
