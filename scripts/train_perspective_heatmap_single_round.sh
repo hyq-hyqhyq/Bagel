@@ -12,7 +12,12 @@ DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/reason_heatmap_stage3_3000_heatm
 WANDB_NAME=${WANDB_NAME:-$RUN_NAME}
 WANDB_RUNID=${WANDB_RUNID:-perspective-heatmap-single-round-v1}
 
-test -s "$DATA_PATH/metadata/train.jsonl"
+test -s "$DATA_PATH/train.jsonl" || {
+  echo "Missing training metadata: $DATA_PATH/train.jsonl" >&2
+  exit 1
+}
+export BAGEL_REASON_HEATMAP_DATA_DIR="$DATA_PATH"
+export BAGEL_REASON_HEATMAP_METADATA_PATH="$DATA_PATH/train.jsonl"
 mkdir -p "$RESULTS_DIR" "$CHECKPOINT_DIR"
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
