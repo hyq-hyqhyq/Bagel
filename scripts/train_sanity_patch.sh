@@ -27,6 +27,7 @@ test -s "$data_path/metadata/train.jsonl" || {
 
 python sanity_patch/prepare_training_metadata.py \
   --data-root "$data_path" \
+  --splits train \
   --train-size 3960 \
   --test-size 40
 
