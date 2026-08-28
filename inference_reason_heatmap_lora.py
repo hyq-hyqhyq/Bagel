@@ -289,6 +289,7 @@ def build_model_architecture(
     llm_config.qk_norm = True
     llm_config.tie_word_embeddings = False
     llm_config.layer_module = "Qwen2MoTDecoderLayer"
+    llm_config.split_gen_expert_by_task = split_gen_adapter_by_task
 
     vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_path, "vit_config.json"))
     vit_config.rope = False

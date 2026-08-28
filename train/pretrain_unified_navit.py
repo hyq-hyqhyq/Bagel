@@ -563,6 +563,7 @@ def main(
     llm_config.qk_norm = model_args.llm_qk_norm
     llm_config.tie_word_embeddings = model_args.tie_word_embeddings
     llm_config.freeze_und = training_args.freeze_und
+    llm_config.split_gen_expert_by_task = training_args.split_gen_adapter_by_task
     if training_args.finetune_from_hf:
         language_model = Qwen2ForCausalLM(llm_config)
     else:

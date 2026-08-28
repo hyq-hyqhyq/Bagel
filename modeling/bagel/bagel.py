@@ -180,6 +180,33 @@ class Bagel(PreTrainedModel):
                 )
                 migrated.setdefault(new_key, state_dict[legacy_key].clone())
             migrated.pop(legacy_key, None)
+
+        # Migrate the legacy single generation expert in each transformer layer
+        # into both task-specific experts when loading an older multitask model.
+        expert_suffixes = {
+            "self_attn.q_proj_moe_gen": "self_attn.gen_experts.{task}.q_proj",
+            "self_attn.k_proj_moe_gen": "self_attn.gen_experts.{task}.k_proj",
+            "self_attn.v_proj_moe_gen": "self_attn.gen_experts.{task}.v_proj",
+            "self_attn.o_proj_moe_gen": "self_attn.gen_experts.{task}.o_proj",
+            "self_attn.q_norm_moe_gen": "self_attn.gen_experts.{task}.q_norm",
+            "self_attn.k_norm_moe_gen": "self_attn.gen_experts.{task}.k_norm",
+            "input_layernorm_moe_gen": "gen_experts.{task}.input_layernorm",
+            "post_attention_layernorm_moe_gen": "gen_experts.{task}.post_attention_layernorm",
+            "mlp_moe_gen": "gen_experts.{task}.mlp",
+            "norm_moe_gen": "norm_moe_gen.{task}",
+        }
+        for legacy_key in list(migrated):
+            for old_suffix, new_suffix in expert_suffixes.items():
+                marker = f".{old_suffix}."
+                if marker in legacy_key:
+                    prefix, param = legacy_key.split(marker, 1)
+                    for task in ("repair", "heatmap"):
+                        migrated.setdefault(
+                            f"{prefix}.{new_suffix.format(task=task)}.{param}",
+                            migrated[legacy_key].clone(),
+                        )
+                    migrated.pop(legacy_key, None)
+                    break
         return migrated
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -339,6 +366,7 @@ class Bagel(PreTrainedModel):
             extra_inputs.update(
                 packed_und_token_indexes=packed_und_token_indexes,
                 packed_gen_token_indexes=packed_vae_token_indexes,
+                gen_task=gen_task or "heatmap",
             )
 
         last_hidden_state = self.language_model(
@@ -723,7 +751,8 @@ class Bagel(PreTrainedModel):
             extra_inputs = {
                 "mode": "gen",
                 "packed_vae_token_indexes": packed_vae_token_indexes,
-                "packed_text_indexes": packed_text_indexes
+                "packed_text_indexes": packed_text_indexes,
+                "gen_task": gen_task,
             }
 
         output = self.language_model.forward_inference(
