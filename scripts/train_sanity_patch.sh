@@ -47,7 +47,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --nproc_per_node="$nproc_per_node" \
   --master_addr="$master_addr" \
   --master_port="$master_port" \
-  train/finetune_reason_heatmap.py \
+  train/finetune_reason_heatmap_multitask.py \
   --dataset_config_file "$dataset_config_file" \
   --model_path "$model_path" \
   --layer_module Qwen2MoTDecoderLayer \
