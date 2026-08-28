@@ -11,16 +11,17 @@ master_addr=${master_addr:-127.0.0.1}
 master_port=${master_port:-29503}
 model_path=${model_path:-/data/bagel/repo/agent/bpipe/models/BAGEL-7B-MoT}
 data_path=${BAGEL_SANITY_PATCH_DATA_DIR:-/data/bagel/repo/Bagel/sanity_patch_data}
-run_name=${run_name:-sanity_patch_single_round_score_heatmap_reason_30k_a800_4gpu}
+run_name=${run_name:-sanity_two_stage_full_gen_experts_score_30k_4gpu}
 output_path=${output_path:-/data/bagel/repo/Bagel/results/$run_name}
 ckpt_path=${ckpt_path:-$output_path/checkpoints}
 wandb_name=${wandb_name:-$run_name}
-wandb_runid=${wandb_runid:-sanity-patch-single-round-score-heatmap-reason-v1}
+wandb_runid=${wandb_runid:-sanity-two-stage-full-gen-v1}
 wandb_offline=${wandb_offline:-False}
 total_steps=${total_steps:-30000}
 dataset_config_file=${dataset_config_file:-./data/configs/sanity_patch.yaml}
 
-# This launcher is single-round: no --two_round flag is passed.
+# Multitask training uses repair and heatmap samples; two-round sequencing is
+# exercised explicitly by the inference pipeline.
 
 test -s "$data_path/metadata/train.jsonl" || {
   echo "Missing training metadata: $data_path/metadata/train.jsonl" >&2
