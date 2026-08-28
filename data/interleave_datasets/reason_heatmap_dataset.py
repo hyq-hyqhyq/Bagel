@@ -150,7 +150,10 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
                     need_vae=True,
                     need_vit=True,
                 )
-            data = self._add_text(data, prompt, need_loss=False)
+            # Keep the conditioning prompt so score supervision always has an
+            # end-of-turn token for text pooling; only generated reason text
+            # is subject to text conditioning dropout.
+            data = self._add_text(data, prompt, need_loss=False, enable_cfg=False)
             if not self.heatmap_only:
                 data = self._add_text(
                     data,
