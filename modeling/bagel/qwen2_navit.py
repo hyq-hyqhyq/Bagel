@@ -1164,10 +1164,39 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         self.post_init()
 
     def init_moe(self):
+        state_dict = self.state_dict()
         for name, param in self.named_parameters():
-            if "moe_gen" in name:
+            original_name = None
+            if ".gen_experts." in name:
+                prefix, expert_path = name.split(".gen_experts.", 1)
+                _, expert_path = expert_path.split(".", 1)
+                if prefix.endswith(".self_attn"):
+                    original_name = f"{prefix}.{expert_path}"
+                else:
+                    branch, suffix = expert_path.split(".", 1)
+                    original_branch = {
+                        "input_layernorm": "input_layernorm",
+                        "post_attention_layernorm": "post_attention_layernorm",
+                        "mlp": "mlp",
+                    }[branch]
+                    original_name = f"{prefix}.{original_branch}.{suffix}"
+            elif any(
+                f".norm_moe_gen.{task}." in name
+                for task in ("repair", "heatmap")
+            ):
+                prefix, suffix = name.split(".norm_moe_gen.", 1)
+                _, parameter_name = suffix.split(".", 1)
+                original_name = f"{prefix}.norm.{parameter_name}"
+            elif "moe_gen" in name:
                 original_name = name.replace("_moe_gen", "")
-                param.data.copy_(self.state_dict()[original_name].data)
+
+            if original_name is not None:
+                if original_name not in state_dict:
+                    raise KeyError(
+                        f"Cannot initialize generation expert {name!r} from "
+                        f"missing shared parameter {original_name!r}"
+                    )
+                param.data.copy_(state_dict[original_name].data)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
