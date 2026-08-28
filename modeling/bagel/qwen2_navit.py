@@ -1201,6 +1201,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         packed_position_ids: torch.Tensor,
         packed_und_token_indexes: Optional[torch.LongTensor] = None,
         packed_gen_token_indexes: Optional[torch.LongTensor] = None,
+        gen_task: str = "heatmap",
     ) -> torch.Tensor:
 
         outputs = self.model(
@@ -1210,6 +1211,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             attention_mask=attention_mask,
             packed_und_token_indexes=packed_und_token_indexes,
             packed_gen_token_indexes=packed_gen_token_indexes,
+            gen_task=gen_task,
         )
         return outputs
 
@@ -1227,6 +1229,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        gen_task: str = "heatmap",
     ) -> BaseNavitOutputWithPast:
 
         outputs = self.model(
@@ -1242,6 +1245,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,
+            gen_task=gen_task,
         )
 
         return outputs
