@@ -19,6 +19,10 @@ wandb_name=${wandb_name:-$run_name}
 wandb_runid=${wandb_runid:-multitask-reason-heatmap-v1}
 wandb_offline=${wandb_offline:-False}
 total_steps=${total_steps:-30000}
+resume_from=${resume_from:-$model_path}
+resume_model_only=${resume_model_only:-True}
+finetune_from_ema=${finetune_from_ema:-True}
+auto_resume=${auto_resume:-False}
 
 test -s "$metadata_path" || {
   echo "Missing training metadata: $metadata_path" >&2
@@ -38,8 +42,8 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --dataset_config_file "$dataset_config_file" \
   --model_path "$model_path" --layer_module Qwen2MoTDecoderLayer \
   --max_latent_size 64 --finetune_from_hf True \
-  --resume_from "$model_path" --resume_model_only True \
-  --finetune_from_ema True --auto_resume False \
+  --resume_from "$resume_from" --resume_model_only "$resume_model_only" \
+  --finetune_from_ema "$finetune_from_ema" --auto_resume "$auto_resume" \
   --sequential_checkpoint_load True --model_init_dtype bfloat16 \
   --visual_gen True --visual_und True --score_head True \
   --split_gen_adapter_by_task True --gen_task_filter joint \
