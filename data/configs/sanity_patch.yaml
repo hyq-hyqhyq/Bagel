@@ -12,4 +12,5 @@ sanity_patch:
   is_mandatory: true
   num_used_data:
   - 3960
+  resume_data_status: false
   weight: 1
