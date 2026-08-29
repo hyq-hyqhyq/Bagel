@@ -178,7 +178,10 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
     def __iter__(self):
         data_paths_per_worker, worker_id = self.get_data_paths_per_worker()
         if self.data_status is not None:
-            row_start_id = self.data_status[worker_id]["data_indexes"] + 1
+            saved_status = self.data_status.get(worker_id, 0)
+            if isinstance(saved_status, dict):
+                saved_status = saved_status.get("data_indexes", -1)
+            row_start_id = int(saved_status) + 1
         else:
             row_start_id = 0
 
