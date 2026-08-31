@@ -2,6 +2,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+SINGLE_HEATMAP_PROMPT = """Analyze the input image for perspective or projection inconsistencies.
+
+Generate a binary localization mask of the erroneous region in the input image.
+Use white for perspective/projection errors and black for all other regions.
+
+If no perspective/projection error is present, output an entirely black mask."""
+
+PAIR_HEATMAP_PROMPT = """Compare the original image with the refined reference image.
+
+Identify the perspective or projection inconsistency present in the original image and generate a binary localization mask on the original image.
+Use white for the erroneous region and black for all other regions.
+
+If the original image contains no perspective/projection error, output an entirely black mask."""
+
+REFINE_PROMPT = """Correct any perspective or projection inconsistency in the input image while preserving all unrelated content and appearance.
+
+Preserve object identity, scene semantics, materials, textures, colors, lighting, and overall photorealism.
+Keep the original camera viewpoint and framing.
+
+If no correction is necessary, preserve the input image unchanged."""
+
+
 PERSPECTIVE_REFINE_PROMPT = (
     "Analyze the perspective and projection realism of the input image, explain "
     "any issue, assess its quality, and generate a refined image that corrects "

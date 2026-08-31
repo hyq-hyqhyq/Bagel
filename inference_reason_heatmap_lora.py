@@ -14,10 +14,13 @@ from safetensors.torch import load_file
 
 from data.data_utils import add_special_tokens, pil_img2rgb
 from data.reason_heatmap_prompts import (
+    PAIR_HEATMAP_PROMPT,
     PERSPECTIVE_REFINE_PROMPT,
     PERSPECTIVE_VERIFY_PROMPT,
+    REFINE_PROMPT,
     SANITY_REFINE_PROMPT,
     SANITY_VERIFY_PROMPT,
+    SINGLE_HEATMAP_PROMPT,
 )
 from data.transforms import ImageTransform
 from inferencer import InterleaveInferencer
@@ -123,6 +126,15 @@ def parse_args():
         default="sanity",
     )
     parser.add_argument(
+        "--prompt_recipe",
+        choices=("legacy", "single_pair_refine"),
+        default="legacy",
+        help=(
+            "Select the prompt set. The default preserves existing inference; "
+            "single_pair_refine uses the prompts from the 2:1:1 recipe."
+        ),
+    )
+    parser.add_argument(
         "--two_round",
         action="store_true",
         help=(
@@ -179,6 +191,14 @@ def parse_args():
         raise ValueError(
             "--heatmap_only only supports the legacy good, bad, and pair tasks."
         )
+    if (
+        args.prompt_recipe == "single_pair_refine"
+        and args.prompt_domain != "perspective"
+    ):
+        raise ValueError(
+            "--prompt_recipe single_pair_refine requires "
+            "--prompt_domain perspective."
+        )
     return args
 
 
@@ -197,13 +217,25 @@ def load_jsonl_row(path, row_index):
     raise IndexError(f"row_index {row_index} is outside {path}")
 
 
-def get_domain_prompts(prompt_domain):
+def get_domain_prompts(prompt_domain, prompt_recipe="legacy"):
+    if prompt_recipe == "single_pair_refine":
+        if prompt_domain != "perspective":
+            raise ValueError(
+                "single_pair_refine prompts only support the perspective domain."
+            )
+        return REFINE_PROMPT, PAIR_HEATMAP_PROMPT
     if prompt_domain == "perspective":
         return PERSPECTIVE_REFINE_PROMPT, PERSPECTIVE_VERIFY_PROMPT
     return SANITY_REFINE_PROMPT, SANITY_VERIFY_PROMPT
 
 
-def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
+def prepare_sample(
+    row,
+    data_dir,
+    sample_type,
+    prompt_domain="sanity",
+    prompt_recipe="legacy",
+):
     good_image_path = os.path.join(data_dir, row["good_image"])
     bad_image_path = os.path.join(data_dir, row["bad_image"])
     heatmap_path = os.path.join(data_dir, row["bad_heatmap"])
@@ -212,8 +244,13 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
     bad_heatmap = pil_img2rgb(Image.open(heatmap_path))
     black_heatmap = Image.new("RGB", good_image.size)
 
-    refine_prompt, verify_prompt = get_domain_prompts(prompt_domain)
-    if prompt_domain == "perspective":
+    refine_prompt, verify_prompt = get_domain_prompts(
+        prompt_domain, prompt_recipe
+    )
+    if prompt_recipe == "single_pair_refine":
+        single_prompt = SINGLE_HEATMAP_PROMPT
+        pair_prompt = PAIR_HEATMAP_PROMPT
+    elif prompt_domain == "perspective":
         single_prompt = PERSPECTIVE_SINGLE_PROMPT
         pair_prompt = PERSPECTIVE_PAIR_PROMPT
     else:
@@ -237,13 +274,19 @@ def prepare_sample(row, data_dir, sample_type, prompt_domain="sanity"):
         output_type = "heatmap"
         target_score = row.get("bad_score", 0.0)
     elif sample_type == "pair":
-        image_paths = [good_image_path, bad_image_path]
-        images = [good_image, bad_image]
+        if prompt_recipe == "single_pair_refine":
+            image_paths = [bad_image_path, good_image_path]
+            images = [bad_image, good_image]
+            reason = row["bad_reason"]
+            target_score = row.get("bad_score", 0.0)
+        else:
+            image_paths = [good_image_path, bad_image_path]
+            images = [good_image, bad_image]
+            reason = row["pair_reason"]
+            target_score = row.get("pair_score")
         prompt = pair_prompt
-        reason = row["pair_reason"]
         target = bad_heatmap
         output_type = "heatmap"
-        target_score = row.get("pair_score")
     elif sample_type == "good_refine":
         image_paths = [good_image_path]
         images = [good_image]
@@ -585,6 +628,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                     args.data_dir,
                     round1_sample_type,
                     args.prompt_domain,
+                    getattr(args, "prompt_recipe", "legacy"),
                 )
                 round1_dir = os.path.join(parent_dir, "round1_refine")
                 refined_image = run_and_save_task(
@@ -607,6 +651,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                         args.data_dir,
                         round2_sample_type,
                         args.prompt_domain,
+                        getattr(args, "prompt_recipe", "legacy"),
                     )
                 )
                 round2[0][1] = refined_image
@@ -646,6 +691,7 @@ def run_inference(args, model_loader, metadata_extra=None):
                 args.data_dir,
                 args.sample_type,
                 args.prompt_domain,
+                getattr(args, "prompt_recipe", "legacy"),
             )
             sample_dir = os.path.join(
                 args.output_dir,

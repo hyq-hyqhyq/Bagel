@@ -4,6 +4,9 @@
 import os
 
 from .interleave_datasets.reason_heatmap_dataset import ReasonHeatmapIterableDataset
+from .interleave_datasets.perspective_single_pair_refine_dataset import (
+    PerspectiveSinglePairRefineIterableDataset,
+)
 from .interleave_datasets.sanity_patch_dataset import SanityPatchIterableDataset
 
 
@@ -19,12 +22,21 @@ def dataset_entry(env_name, metadata_env_name=None):
 
 DATASET_REGISTRY = {
     "reason_heatmap": ReasonHeatmapIterableDataset,
+    "perspective_single_pair_refine": (
+        PerspectiveSinglePairRefineIterableDataset
+    ),
     "sanity_patch": SanityPatchIterableDataset,
 }
 
 
 DATASET_INFO = {
     "reason_heatmap": {
+        "perspective": dataset_entry(
+            "BAGEL_REASON_HEATMAP_DATA_DIR",
+            "BAGEL_REASON_HEATMAP_METADATA_PATH",
+        ),
+    },
+    "perspective_single_pair_refine": {
         "perspective": dataset_entry(
             "BAGEL_REASON_HEATMAP_DATA_DIR",
             "BAGEL_REASON_HEATMAP_METADATA_PATH",

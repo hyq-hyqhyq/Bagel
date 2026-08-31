@@ -53,6 +53,15 @@ def parse_args():
         default="sanity",
     )
     parser.add_argument(
+        "--prompt_recipe",
+        choices=("legacy", "single_pair_refine"),
+        default="legacy",
+        help=(
+            "Select the prompt set. The default preserves existing inference; "
+            "single_pair_refine uses the prompts from the 2:1:1 recipe."
+        ),
+    )
+    parser.add_argument(
         "--two_round",
         action="store_true",
         help=(
@@ -105,6 +114,14 @@ def parse_args():
     if args.heatmap_only and args.sample_type not in ("good", "bad", "pair"):
         raise ValueError(
             "--heatmap_only only supports the legacy good, bad, and pair tasks."
+        )
+    if (
+        args.prompt_recipe == "single_pair_refine"
+        and args.prompt_domain != "perspective"
+    ):
+        raise ValueError(
+            "--prompt_recipe single_pair_refine requires "
+            "--prompt_domain perspective."
         )
     return args
 
