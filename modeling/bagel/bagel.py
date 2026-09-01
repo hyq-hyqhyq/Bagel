@@ -1047,6 +1047,9 @@ class Bagel(PreTrainedModel):
         route_gen_task: bool = False,
     ):
         vae2llm, llm2vae = self._get_generation_adapter(gen_task)
+        enable_taylorseer = getattr(
+            self.language_model.model, "enable_taylorseer", False
+        )
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
@@ -1069,7 +1072,7 @@ class Bagel(PreTrainedModel):
             if route_gen_task:
                 extra_inputs["gen_task"] = gen_task
         
-        if self.language_model.model.enable_taylorseer:
+        if enable_taylorseer:
             self.language_model.model.cache_dic = model_pred_cache_dic
             self.language_model.model.current = model_pred_current
 
@@ -1089,7 +1092,7 @@ class Bagel(PreTrainedModel):
         v_t = v_t[packed_vae_token_indexes]
 
         if cfg_text_scale > 1.0:
-            if self.language_model.model.enable_taylorseer:
+            if enable_taylorseer:
                 self.language_model.model.cache_dic = model_pred_text_cache_dic
                 self.language_model.model.current = model_pred_text_current
             cfg_text_output = self.language_model.forward_inference(
@@ -1108,7 +1111,7 @@ class Bagel(PreTrainedModel):
             cfg_text_v_t = cfg_text_v_t[packed_vae_token_indexes]
 
         if cfg_img_scale > 1.0:
-            if self.language_model.model.enable_taylorseer:
+            if enable_taylorseer:
                 self.language_model.model.cache_dic = model_pred_img_cache_dic
                 self.language_model.model.current = model_pred_img_current
             cfg_img_output = self.language_model.forward_inference(
