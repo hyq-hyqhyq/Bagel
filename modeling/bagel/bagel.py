@@ -229,11 +229,11 @@ class Bagel(PreTrainedModel):
 
     def forward(
         self,
-        sequence_length: int,
-        packed_text_ids: torch.LongTensor,
-        packed_text_indexes: torch.LongTensor,
-        sample_lens: List[int],
-        packed_position_ids: torch.LongTensor,
+        sequence_length: Optional[int] = None,
+        packed_text_ids: Optional[torch.LongTensor] = None,
+        packed_text_indexes: Optional[torch.LongTensor] = None,
+        sample_lens: Optional[List[int]] = None,
+        packed_position_ids: Optional[torch.LongTensor] = None,
         nested_attention_masks: List[torch.Tensor] = None,
         split_lens: List[int] = None,
         attn_modes: List[str] = None,
@@ -260,6 +260,9 @@ class Bagel(PreTrainedModel):
         score_vae_sample_ids: Optional[torch.LongTensor] = None,
         score_vit_token_indexes: Optional[torch.LongTensor] = None,
         score_vit_sample_ids: Optional[torch.LongTensor] = None,
+        e2e_inputs: Optional[Dict[str, Any]] = None,
+        e2e_vae_model: Optional[nn.Module] = None,
+        e2e_options: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -286,6 +289,16 @@ class Bagel(PreTrainedModel):
             packed_timesteps: 1-D float tensor, flow timesteps. 0 indicates use clean image.
             mse_loss_indexes: 1-D bool tensor, where to compute mse loss.
         """
+        if e2e_inputs is not None:
+            from .e2e import forward_e2e
+
+            return forward_e2e(
+                self,
+                e2e_inputs,
+                vae_model=e2e_vae_model,
+                options=e2e_options or {},
+            )
+
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros(size=(sequence_length, self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
@@ -475,7 +488,6 @@ class Bagel(PreTrainedModel):
 
         return generation_input, newlens, new_rope
 
-    @torch.no_grad
     def forward_cache_update_text(
         self,
         past_key_values: NaiveCache,
@@ -573,7 +585,6 @@ class Bagel(PreTrainedModel):
 
         return generation_input, newlens, new_rope
 
-    @torch.no_grad
     def forward_cache_update_vit(
         self,
         past_key_values: NaiveCache,
@@ -705,7 +716,6 @@ class Bagel(PreTrainedModel):
 
         return generation_input, newlens, new_rope
 
-    @torch.no_grad
     def forward_cache_update_vae(
         self,
         vae_model,
@@ -724,13 +734,19 @@ class Bagel(PreTrainedModel):
         packed_key_value_indexes: torch.Tensor,
         return_hidden: bool = False,
         gen_task: Optional[str] = None,
+        padded_latent: Optional[torch.Tensor] = None,
     ):
         vae2llm, _ = self._get_generation_adapter(gen_task)
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
         packed_sequence[packed_text_indexes] = packed_text_embedding
 
-        padded_latent = vae_model.encode(padded_images)
+        if padded_latent is None:
+            if vae_model is None or padded_images is None:
+                raise ValueError(
+                    "Expected padded_images+vae_model or padded_latent"
+                )
+            padded_latent = vae_model.encode(padded_images)
 
         p = self.latent_patch_size
         packed_latent = list()
@@ -979,7 +995,6 @@ class Bagel(PreTrainedModel):
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
         return unpacked_latent
 
-    @torch.no_grad
     def _forward_flow(
         self,
         x_t: torch.Tensor,
@@ -1019,6 +1034,7 @@ class Bagel(PreTrainedModel):
         model_pred_text_current: Optional[int] = None,
         model_pred_img_cache_dic: Optional[Dict[str, Any]] = None,
         model_pred_img_current: Optional[int] = None,
+        route_gen_task: bool = False,
     ):
         vae2llm, llm2vae = self._get_generation_adapter(gen_task)
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
@@ -1038,8 +1054,10 @@ class Bagel(PreTrainedModel):
             extra_inputs = {
                 "mode": "gen",
                 "packed_vae_token_indexes": packed_vae_token_indexes,
-                "packed_text_indexes": packed_text_indexes
+                "packed_text_indexes": packed_text_indexes,
             }
+            if route_gen_task:
+                extra_inputs["gen_task"] = gen_task
         
         if self.language_model.model.enable_taylorseer:
             self.language_model.model.cache_dic = model_pred_cache_dic

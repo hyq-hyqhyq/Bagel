@@ -2,6 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+GEN_THINK_SYSTEM_PROMPT = (
+    "You should first think about the planning process in the mind and then "
+    "generate the image. \n"
+    "The planning process is enclosed within <think> </think> tags, i.e. "
+    "<think> planning process here </think> image here"
+)
+
+
 SINGLE_HEATMAP_PROMPT = """Analyze the input image for perspective or projection inconsistencies.
 
 Generate a binary localization mask of the erroneous region in the input image.

@@ -8,16 +8,13 @@ from PIL import Image
 import torch
 
 from data.data_utils import pil_img2rgb
+from data.reason_heatmap_prompts import GEN_THINK_SYSTEM_PROMPT
 from modeling.bagel.qwen2_navit import NaiveCache
 
 
 
 VLM_THINK_SYSTEM_PROMPT = '''You should first think about the reasoning process in the mind and then provide the user with the answer. 
 The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here'''
-
-GEN_THINK_SYSTEM_PROMPT = '''You should first think about the planning process in the mind and then generate the image. 
-The planning process is enclosed within <think> </think> tags, i.e. <think> planning process here </think> image here'''
-
 
 class InterleaveInferencer:
     def __init__(self, model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids):

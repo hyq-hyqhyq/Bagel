@@ -354,6 +354,10 @@ class TrainingArguments:
         default=0.9999,
         metadata={"help": "Decay rate for the exponential moving average of model weights."}
     )
+    ema_enabled: bool = field(
+        default=True,
+        metadata={"help": "Maintain and save a second FSDP EMA model."},
+    )
     max_grad_norm: float = field(
         default=1.0,
         metadata={"help": "Gradient clipping threshold (L2 norm)."}
@@ -482,6 +486,22 @@ def main(
         raise ValueError(
             "gen_task_filter requires split_gen_adapter_by_task=True"
         )
+    if getattr(training_args, "e2e_enabled", False):
+        if not (
+            training_args.visual_gen
+            and training_args.visual_und
+            and training_args.score_head
+            and training_args.split_gen_adapter_by_task
+        ):
+            raise ValueError(
+                "E2E training requires visual_gen, visual_und, score_head, "
+                "and split_gen_adapter_by_task"
+            )
+        if not training_args.freeze_vae:
+            raise ValueError(
+                "E2E VAE parameters must stay frozen; gradients still pass "
+                "through the decoder into the repair latent"
+            )
     if training_args.peak_device_tflops <= 0:
         auto_tflops = detect_peak_tflops(training_args.peak_device_tflops)
         if auto_tflops > 0:
@@ -659,7 +679,7 @@ def main(
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
     )
-    ema_model = deepcopy(model)
+    ema_model = deepcopy(model) if training_args.ema_enabled else None
     checkpoint_exists = resume_from is not None and os.path.exists(resume_from)
     if training_args.sequential_checkpoint_load and checkpoint_exists:
         for loading_rank in range(dist.get_world_size()):
@@ -681,7 +701,8 @@ def main(
         model, ema_model = FSDPCheckpoint.try_load_ckpt(
             resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
         )
-    ema_model = fsdp_ema_setup(ema_model, fsdp_config)
+    if ema_model is not None:
+        ema_model = fsdp_ema_setup(ema_model, fsdp_config)
     fsdp_model = fsdp_wrapper(model, fsdp_config)
     apply_activation_checkpointing(
         fsdp_model, 
@@ -730,51 +751,92 @@ def main(
     # Setup packed dataloader
     with open(data_args.dataset_config_file, "r") as stream:
         dataset_meta = yaml.safe_load(stream)
-    dataset_config = DataConfig(grouped_datasets=dataset_meta)
-    if training_args.visual_und:
-        dataset_config.vit_patch_size = model_args.vit_patch_size
-        dataset_config.max_num_patch_per_side = model_args.vit_max_num_patch_per_side
-    if training_args.visual_gen:
-        vae_image_downsample = model_args.latent_patch_size * vae_config.downsample
-        dataset_config.vae_image_downsample = vae_image_downsample
-        dataset_config.max_latent_size = model_args.max_latent_size
-        dataset_config.text_cond_dropout_prob = model_args.text_cond_dropout_prob
-        dataset_config.vae_cond_dropout_prob = model_args.vae_cond_dropout_prob
-        dataset_config.vit_cond_dropout_prob = model_args.vit_cond_dropout_prob
-    train_dataset = PackedDataset(
-        dataset_config,
-        tokenizer=tokenizer,
-        special_tokens=new_token_ids,
-        local_rank=dist.get_rank(),
-        world_size=dist.get_world_size(),
-        num_workers=data_args.num_workers,
-        expected_num_tokens=training_args.expected_num_tokens,
-        max_num_tokens_per_sample=data_args.max_num_tokens_per_sample,
-        max_num_tokens=data_args.max_num_tokens,
-        max_buffer_size=data_args.max_buffer_size,
-        prefer_buffer_before=data_args.prefer_buffer_before,
-        interpolate_pos=model_args.interpolate_pos,
-        use_flex=training_args.use_flex,
-        split_gen_adapter_by_task=training_args.split_gen_adapter_by_task,
-        gen_task_filter=training_args.gen_task_filter,
-        data_status=data_status,
-    )
-    train_dataset.set_epoch(data_args.data_seed)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=1, # batch size is 1 packed dataset
-        num_workers=data_args.num_workers,
-        pin_memory=True,
-        collate_fn=collate_wrapper(),
-        drop_last=True,
-        prefetch_factor=data_args.prefetch_factor,
-    )
+    if getattr(training_args, "e2e_enabled", False):
+        from train.reason_heatmap_e2e import build_e2e_train_loader
+
+        train_loader = build_e2e_train_loader(
+            dataset_meta=dataset_meta,
+            tokenizer=tokenizer,
+            local_rank=dist.get_rank(),
+            world_size=dist.get_world_size(),
+            num_workers=data_args.num_workers,
+            prefetch_factor=data_args.prefetch_factor,
+            data_seed=data_args.data_seed,
+            data_status=data_status,
+        )
+    else:
+        dataset_config = DataConfig(grouped_datasets=dataset_meta)
+        if training_args.visual_und:
+            dataset_config.vit_patch_size = model_args.vit_patch_size
+            dataset_config.max_num_patch_per_side = model_args.vit_max_num_patch_per_side
+        if training_args.visual_gen:
+            vae_image_downsample = model_args.latent_patch_size * vae_config.downsample
+            dataset_config.vae_image_downsample = vae_image_downsample
+            dataset_config.max_latent_size = model_args.max_latent_size
+            dataset_config.text_cond_dropout_prob = model_args.text_cond_dropout_prob
+            dataset_config.vae_cond_dropout_prob = model_args.vae_cond_dropout_prob
+            dataset_config.vit_cond_dropout_prob = model_args.vit_cond_dropout_prob
+        train_dataset = PackedDataset(
+            dataset_config,
+            tokenizer=tokenizer,
+            special_tokens=new_token_ids,
+            local_rank=dist.get_rank(),
+            world_size=dist.get_world_size(),
+            num_workers=data_args.num_workers,
+            expected_num_tokens=training_args.expected_num_tokens,
+            max_num_tokens_per_sample=data_args.max_num_tokens_per_sample,
+            max_num_tokens=data_args.max_num_tokens,
+            max_buffer_size=data_args.max_buffer_size,
+            prefer_buffer_before=data_args.prefer_buffer_before,
+            interpolate_pos=model_args.interpolate_pos,
+            use_flex=training_args.use_flex,
+            split_gen_adapter_by_task=training_args.split_gen_adapter_by_task,
+            gen_task_filter=training_args.gen_task_filter,
+            data_status=data_status,
+        )
+        train_dataset.set_epoch(data_args.data_seed)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=1, # batch size is 1 packed dataset
+            num_workers=data_args.num_workers,
+            pin_memory=True,
+            collate_fn=collate_wrapper(),
+            drop_last=True,
+            prefetch_factor=data_args.prefetch_factor,
+        )
 
     # Prepare models for training:
     if training_args.visual_gen:
         vae_model.to(device).eval()
-    fsdp_model.train()
-    ema_model.eval()
+    if getattr(training_args, "e2e_enabled", False):
+        # Inference methods dispatch through module.forward based on training
+        # state. Eval mode keeps that dispatch and still retains autograd.
+        fsdp_model.eval()
+    else:
+        fsdp_model.train()
+    if ema_model is not None:
+        ema_model.eval()
+
+    if getattr(training_args, "e2e_enabled", False):
+        from train.reason_heatmap_e2e import run_e2e_training
+
+        run_e2e_training(
+            fsdp_model=fsdp_model,
+            vae_model=vae_model,
+            tokenizer=tokenizer,
+            special_tokens=new_token_ids,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            train_step=train_step,
+            data_status=data_status,
+            training_args=training_args,
+            fsdp_config=fsdp_config,
+            logger=logger,
+            ema_model=ema_model,
+            device=device,
+        )
+        return
 
     # train loop
     start_time = time()
@@ -949,7 +1011,8 @@ def main(
             total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
             optimizer.step()
             scheduler.step()
-            fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
+            if ema_model is not None:
+                fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
             optimizer.zero_grad()
         
         # Log loss values:
