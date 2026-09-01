@@ -394,7 +394,11 @@ def truncated_sample(
     for index, timestep_value in enumerate(timesteps):
         grad_enabled = index >= grad_start
         with torch.set_grad_enabled(grad_enabled):
-            timestep = timestep_value.to(dtype=x_t.dtype).expand(x_t.shape[0])
+            # Keep timesteps in float32.  BAGEL's flow path validates that all
+            # packed tokens share one timestep with Tensor.unique(), which is
+            # not implemented for bfloat16 on the CUDA/PyTorch versions used
+            # by the training environment.
+            timestep = timestep_value.float().expand(x_t.shape[0])
             velocity = model._forward_flow(
                 x_t=x_t,
                 timestep=timestep,
@@ -430,7 +434,7 @@ def _flow_loss(model, context, target_latent, image_size, special_tokens, task):
     query.pop("packed_init_noises")
     velocity = model._forward_flow(
         x_t=x_t,
-        timestep=timestep.to(dtype=x_t.dtype).expand(x_t.shape[0]),
+        timestep=timestep.float().expand(x_t.shape[0]),
         gen_task=task,
         route_gen_task=True,
         **query,

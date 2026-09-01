@@ -200,6 +200,16 @@ class Bagel(PreTrainedModel):
                 marker = f".{old_suffix}."
                 if marker in legacy_key:
                     prefix, param = legacy_key.split(marker, 1)
+                    # A checkpoint produced by a split-task model already has
+                    # keys such as ``norm_moe_gen.repair.weight``.  Only the
+                    # legacy shared ``norm_moe_gen.weight`` form should be
+                    # duplicated; otherwise loading would create invalid keys
+                    # like ``norm_moe_gen.repair.repair.weight``.
+                    if (
+                        old_suffix == "norm_moe_gen"
+                        and param.split(".", 1)[0] in ("repair", "heatmap")
+                    ):
+                        break
                     for task in ("repair", "heatmap"):
                         migrated.setdefault(
                             f"{prefix}.{new_suffix.format(task=task)}.{param}",
