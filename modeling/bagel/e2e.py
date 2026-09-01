@@ -486,7 +486,8 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     ``phase='heatmap'`` builds the sampled repair-to-heatmap graph.  Keeping
     the phases separate lets the training loop backward and release the
     repair graph before constructing the substantially larger K-step graph.
-    ``phase='all'`` is retained for callers that need the old behavior.
+    A combined phase is deliberately unsupported so the two forward passes
+    cannot accidentally coexist before backward.
     """
     if vae_model is None:
         raise ValueError("e2e_vae_model is required")
@@ -494,10 +495,10 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     special_tokens = options.get("special_tokens")
     if tokenizer is None or special_tokens is None:
         raise ValueError("E2E options require tokenizer and special_tokens")
-    phase = options.get("phase", "all")
-    if phase not in ("all", "repair", "heatmap"):
+    phase = options.get("phase")
+    if phase not in ("repair", "heatmap"):
         raise ValueError(
-            "E2E phase must be one of: all, repair, heatmap; "
+            "E2E phase must be one of: repair, heatmap; "
             f"got {phase!r}"
         )
 
@@ -523,7 +524,7 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     heatmap_reason_ids = inputs["heatmap_reason_ids"]
 
     losses = {}
-    if phase in ("all", "repair"):
+    if phase == "repair":
         # Standard Task-1 supervision: teacher-forced reason/score and
         # one-step flow matching.  This graph is independent of the sampled
         # repair path and can therefore be backwarded and freed first.
@@ -558,8 +559,7 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
             repair_score=repair_score,
             repair_score_pred=repair_score_pred.detach(),
         )
-        if phase == "repair":
-            return losses
+        return losses
 
     # Inference-faithful Task-1 prefill and autoregressive reason are discrete
     # and intentionally graph-free.  Only the final K Euler updates retain a
