@@ -28,6 +28,9 @@ LOSS_WEIGHTS = {
     "repair_reason": 0.05,
 }
 
+REPAIR_LOSS_NAMES = ("repair_flow", "repair_score", "repair_reason")
+HEATMAP_LOSS_NAMES = ("heatmap_flow", "heatmap_score", "heatmap_reason")
+
 
 def _single_item_collate(batch):
     if len(batch) != 1:
@@ -200,6 +203,10 @@ def run_e2e_training(
         training_args.num_timesteps - 1,
         training_args.gradient_denoise_steps,
     )
+    logger.info(
+        "E2E backward: repair phase first, heatmap phase second, "
+        "one optimizer step after accumulated gradients"
+    )
 
     data_status = data_status or {}
     optimizer.zero_grad()
@@ -212,20 +219,62 @@ def run_e2e_training(
         if completed_step >= training_args.total_steps:
             break
         data, data_indexes = _prepare_e2e_inputs(raw_data, vae_model, device)
+        # Phase 1: backward the independent teacher-forced repair objective
+        # first.  Do not zero gradients: phase 2 accumulates into the same
+        # parameter gradients before the single optimizer step.
         with torch.amp.autocast(
             "cuda", enabled=True, dtype=torch.bfloat16
         ):
-            loss_dict = fsdp_model(
+            repair_loss_dict = fsdp_model(
                 e2e_inputs=data,
                 e2e_vae_model=vae_model,
-                e2e_options=options,
+                e2e_options={**options, "phase": "repair"},
             )
-            total_loss = sum(
-                loss_dict[name] * configured_weights[name]
-                for name in LOSS_WEIGHTS
+            repair_total_loss = sum(
+                repair_loss_dict[name] * configured_weights[name]
+                for name in REPAIR_LOSS_NAMES
             )
-            scaled_loss = total_loss / training_args.gradient_accumulation_steps
-        scaled_loss.backward()
+            repair_scaled_loss = (
+                repair_total_loss
+                / training_args.gradient_accumulation_steps
+            )
+        repair_scaled_loss.backward()
+        loss_values = {
+            name: value.detach()
+            for name, value in repair_loss_dict.items()
+        }
+        repair_total_value = repair_total_loss.detach()
+        del repair_loss_dict, repair_total_loss, repair_scaled_loss
+
+        # Phase 2: build a fresh inference-faithful Task-1 sampling graph and
+        # retain connectivity through VAE decode + ViT into every heatmap
+        # loss.  Only the final K denoising updates carry gradients.
+        with torch.amp.autocast(
+            "cuda", enabled=True, dtype=torch.bfloat16
+        ):
+            heatmap_loss_dict = fsdp_model(
+                e2e_inputs=data,
+                e2e_vae_model=vae_model,
+                e2e_options={**options, "phase": "heatmap"},
+            )
+            heatmap_total_loss = sum(
+                heatmap_loss_dict[name] * configured_weights[name]
+                for name in HEATMAP_LOSS_NAMES
+            )
+            heatmap_scaled_loss = (
+                heatmap_total_loss
+                / training_args.gradient_accumulation_steps
+            )
+        heatmap_scaled_loss.backward()
+        loss_values.update(
+            {
+                name: value.detach()
+                for name, value in heatmap_loss_dict.items()
+            }
+        )
+        heatmap_total_value = heatmap_total_loss.detach()
+        total_loss = repair_total_value + heatmap_total_value
+        del heatmap_loss_dict, heatmap_total_loss, heatmap_scaled_loss
 
         optimizer_updated = (
             (micro_step + 1) % training_args.gradient_accumulation_steps == 0
@@ -253,10 +302,9 @@ def run_e2e_training(
         if completed_step % training_args.log_every == 0:
             elapsed = max(time() - start_time, 1e-6)
             log_values = {
-                name: value.detach().float()
-                for name, value in loss_dict.items()
+                name: value.float() for name, value in loss_values.items()
             }
-            log_values["total"] = total_loss.detach().float()
+            log_values["total"] = total_loss.float()
             for value in log_values.values():
                 dist.all_reduce(value, op=dist.ReduceOp.SUM)
                 value.div_(dist.get_world_size())
