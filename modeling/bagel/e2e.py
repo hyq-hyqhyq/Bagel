@@ -480,13 +480,27 @@ def _tensor_value(inputs, key, device):
 
 
 def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
-    """Compute all six losses in one connected graph."""
+    """Compute one of the two independent E2E loss phases.
+
+    ``phase='repair'`` builds only the teacher-forced Task-1 graph, while
+    ``phase='heatmap'`` builds the sampled repair-to-heatmap graph. Keeping
+    the phases separate lets the training loop backward and release the
+    repair graph before constructing the substantially larger K-step graph.
+    A combined phase is deliberately unsupported so the two forward graphs
+    cannot accidentally coexist before backward.
+    """
     if vae_model is None:
         raise ValueError("e2e_vae_model is required")
     tokenizer = options.get("tokenizer")
     special_tokens = options.get("special_tokens")
     if tokenizer is None or special_tokens is None:
         raise ValueError("E2E options require tokenizer and special_tokens")
+    phase = options.get("phase")
+    if phase not in ("repair", "heatmap"):
+        raise ValueError(
+            "E2E phase must be one of: repair, heatmap; "
+            f"got {phase!r}"
+        )
 
     device = next(model.parameters()).device
     original_latent = _tensor_value(inputs, "original_latent", device)
@@ -509,34 +523,43 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     repair_reason_ids = inputs["repair_reason_ids"]
     heatmap_reason_ids = inputs["heatmap_reason_ids"]
 
-    # Standard Task-1 supervision: teacher-forced reason/score and one-step
-    # flow matching.  It is separate from the sampled path but joins the same
-    # scalar loss and backward pass.
-    repair_context = _new_context(model)
-    _update_text(model, repair_context, system_ids, special_tokens)
-    _update_image(
-        model,
-        repair_context,
-        original_latent,
-        original_vit,
-        special_tokens,
-        "repair",
-    )
-    _update_text(model, repair_context, repair_prompt_ids, special_tokens)
-    repair_ce, repair_context = _reason_ce(
-        model, repair_context, repair_reason_ids, special_tokens
-    )
-    repair_score, repair_score_pred = _score_loss(
-        model, repair_context, score_label
-    )
-    repair_flow = _flow_loss(
-        model,
-        repair_context,
-        refined_latent,
-        image_size,
-        special_tokens,
-        "repair",
-    )
+    losses = {}
+    if phase == "repair":
+        # Standard Task-1 supervision: teacher-forced reason/score and
+        # one-step flow matching. This graph is independent of the sampled
+        # repair path and can therefore be backwarded and freed first.
+        repair_context = _new_context(model)
+        _update_text(model, repair_context, system_ids, special_tokens)
+        _update_image(
+            model,
+            repair_context,
+            original_latent,
+            original_vit,
+            special_tokens,
+            "repair",
+        )
+        _update_text(model, repair_context, repair_prompt_ids, special_tokens)
+        repair_ce, repair_context = _reason_ce(
+            model, repair_context, repair_reason_ids, special_tokens
+        )
+        repair_score, repair_score_pred = _score_loss(
+            model, repair_context, score_label
+        )
+        repair_flow = _flow_loss(
+            model,
+            repair_context,
+            refined_latent,
+            image_size,
+            special_tokens,
+            "repair",
+        )
+        losses.update(
+            repair_flow=repair_flow,
+            repair_reason=repair_ce,
+            repair_score=repair_score,
+            repair_score_pred=repair_score_pred.detach(),
+        )
+        return losses
 
     # Inference-faithful Task-1 prefill and autoregressive reason are discrete
     # and intentionally graph-free.  Only the final K Euler updates retain a
@@ -631,16 +654,13 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
         "heatmap",
     )
 
-    return {
-        "repair_flow": repair_flow,
-        "heatmap_flow": heatmap_flow,
-        "repair_reason": repair_ce,
-        "heatmap_reason": heatmap_ce,
-        "repair_score": repair_score,
-        "heatmap_score": heatmap_score,
-        "repair_score_pred": repair_score_pred.detach(),
-        "heatmap_score_pred": heatmap_score_pred.detach(),
-        "generated_reason_tokens": repair_flow.new_tensor(
+    losses.update(
+        heatmap_flow=heatmap_flow,
+        heatmap_reason=heatmap_ce,
+        heatmap_score=heatmap_score,
+        heatmap_score_pred=heatmap_score_pred.detach(),
+        generated_reason_tokens=heatmap_flow.new_tensor(
             generated_reason_ids.numel()
         ),
-    }
+    )
+    return losses
