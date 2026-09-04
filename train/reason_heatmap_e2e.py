@@ -28,7 +28,8 @@ LOSS_WEIGHTS = {
     "repair_reason": 0.05,
 }
 
-REPAIR_LOSS_NAMES = ("repair_flow", "repair_score", "repair_reason")
+REPAIR_REASON_SCORE_LOSS_NAMES = ("repair_score", "repair_reason")
+REPAIR_FLOW_LOSS_NAMES = ("repair_flow",)
 HEATMAP_LOSS_NAMES = ("heatmap_flow", "heatmap_score", "heatmap_reason")
 
 
@@ -205,8 +206,9 @@ def run_e2e_training(
         training_args.gradient_denoise_steps,
     )
     logger.info(
-        "E2E execution: repair forward/backward, release repair graph, "
-        "heatmap E2E forward/backward, then one optimizer step"
+        "E2E execution: repair reason/score forward/backward, repair flow "
+        "forward/backward, heatmap E2E forward/backward, then one optimizer "
+        "step"
     )
     logger.info(
         "E2E VAE decoder activation checkpoint: %s",
@@ -225,34 +227,73 @@ def run_e2e_training(
             break
         data, data_indexes = _prepare_e2e_inputs(raw_data, vae_model, device)
 
-        # Phase 1: construct and backward only the independent teacher-forced
-        # repair graph. Do not clear gradients: phase 2 accumulates into the
-        # same parameter gradients before the single optimizer step.
+        # Phase 1: teacher-forced repair reason and score. Do not clear
+        # gradients between phases: all three accumulate into the same
+        # parameter gradients before one optimizer step.
         with torch.amp.autocast(
             "cuda", enabled=True, dtype=torch.bfloat16
         ):
-            repair_loss_dict = fsdp_model(
+            repair_reason_score_loss_dict = fsdp_model(
                 e2e_inputs=data,
                 e2e_vae_model=vae_model,
-                e2e_options={**options, "phase": "repair"},
+                e2e_options={**options, "phase": "repair_reason_score"},
             )
-            repair_total_loss = sum(
-                repair_loss_dict[name] * configured_weights[name]
-                for name in REPAIR_LOSS_NAMES
+            repair_reason_score_total_loss = sum(
+                repair_reason_score_loss_dict[name]
+                * configured_weights[name]
+                for name in REPAIR_REASON_SCORE_LOSS_NAMES
             )
-            repair_scaled_loss = (
-                repair_total_loss
+            repair_reason_score_scaled_loss = (
+                repair_reason_score_total_loss
                 / training_args.gradient_accumulation_steps
             )
-        repair_scaled_loss.backward()
+        repair_reason_score_scaled_loss.backward()
         loss_values = {
             name: value.detach()
-            for name, value in repair_loss_dict.items()
+            for name, value in repair_reason_score_loss_dict.items()
         }
-        repair_total_value = repair_total_loss.detach()
-        del repair_loss_dict, repair_total_loss, repair_scaled_loss
+        repair_reason_score_total_value = (
+            repair_reason_score_total_loss.detach()
+        )
+        del (
+            repair_reason_score_loss_dict,
+            repair_reason_score_total_loss,
+            repair_reason_score_scaled_loss,
+        )
 
-        # Phase 2: construct a fresh Task-1 sampling -> differentiable VAE
+        # Phase 2: rebuild the teacher-forced repair prefix and supervise only
+        # flow matching. The phase-1 graph has already been released.
+        with torch.amp.autocast(
+            "cuda", enabled=True, dtype=torch.bfloat16
+        ):
+            repair_flow_loss_dict = fsdp_model(
+                e2e_inputs=data,
+                e2e_vae_model=vae_model,
+                e2e_options={**options, "phase": "repair_flow"},
+            )
+            repair_flow_total_loss = sum(
+                repair_flow_loss_dict[name] * configured_weights[name]
+                for name in REPAIR_FLOW_LOSS_NAMES
+            )
+            repair_flow_scaled_loss = (
+                repair_flow_total_loss
+                / training_args.gradient_accumulation_steps
+            )
+        repair_flow_scaled_loss.backward()
+        loss_values.update(
+            {
+                name: value.detach()
+                for name, value in repair_flow_loss_dict.items()
+            }
+        )
+        repair_flow_total_value = repair_flow_total_loss.detach()
+        del (
+            repair_flow_loss_dict,
+            repair_flow_total_loss,
+            repair_flow_scaled_loss,
+        )
+
+        # Phase 3: construct a fresh Task-1 sampling -> differentiable VAE
         # decode -> ViT -> Task-2 heatmap graph. The heatmap losses remain
         # connected to the final K Task-1 denoising updates.
         with torch.amp.autocast(
@@ -279,7 +320,11 @@ def run_e2e_training(
             }
         )
         heatmap_total_value = heatmap_total_loss.detach()
-        total_loss = repair_total_value + heatmap_total_value
+        total_loss = (
+            repair_reason_score_total_value
+            + repair_flow_total_value
+            + heatmap_total_value
+        )
         del heatmap_loss_dict, heatmap_total_loss, heatmap_scaled_loss
 
         optimizer_updated = (

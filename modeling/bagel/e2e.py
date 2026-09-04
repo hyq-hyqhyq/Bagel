@@ -481,14 +481,13 @@ def _tensor_value(inputs, key, device):
 
 
 def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
-    """Compute one of the two independent E2E loss phases.
+    """Compute one of the three independent E2E loss phases.
 
-    ``phase='repair'`` builds only the teacher-forced Task-1 graph, while
-    ``phase='heatmap'`` builds the sampled repair-to-heatmap graph. Keeping
-    the phases separate lets the training loop backward and release the
-    repair graph before constructing the substantially larger K-step graph.
-    A combined phase is deliberately unsupported so the two forward graphs
-    cannot accidentally coexist before backward.
+    The two teacher-forced Task-1 objectives use separate forward graphs:
+    ``repair_reason_score`` supervises reasoning and score, and
+    ``repair_flow`` supervises flow matching. ``heatmap`` then builds the
+    sampled repair-to-heatmap graph. A combined repair phase is deliberately
+    unsupported so no two phase graphs can coexist before backward.
     """
     if vae_model is None:
         raise ValueError("e2e_vae_model is required")
@@ -497,9 +496,10 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     if tokenizer is None or special_tokens is None:
         raise ValueError("E2E options require tokenizer and special_tokens")
     phase = options.get("phase")
-    if phase not in ("repair", "heatmap"):
+    if phase not in ("repair_reason_score", "repair_flow", "heatmap"):
         raise ValueError(
-            "E2E phase must be one of: repair, heatmap; "
+            "E2E phase must be one of: repair_reason_score, repair_flow, "
+            "heatmap; "
             f"got {phase!r}"
         )
 
@@ -525,10 +525,10 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     heatmap_reason_ids = inputs["heatmap_reason_ids"]
 
     losses = {}
-    if phase == "repair":
-        # Standard Task-1 supervision: teacher-forced reason/score and
-        # one-step flow matching. This graph is independent of the sampled
-        # repair path and can therefore be backwarded and freed first.
+    if phase in ("repair_reason_score", "repair_flow"):
+        # Both repair phases deliberately rebuild the common prefix. This
+        # costs one extra forward, but lets each graph be backwarded and
+        # released before the next phase is constructed.
         repair_context = _new_context(model)
         _update_text(model, repair_context, system_ids, special_tokens)
         _update_image(
@@ -540,11 +540,29 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
             "repair",
         )
         _update_text(model, repair_context, repair_prompt_ids, special_tokens)
-        repair_ce, repair_context = _reason_ce(
-            model, repair_context, repair_reason_ids, special_tokens
-        )
-        repair_score, repair_score_pred = _score_loss(
-            model, repair_context, score_label
+
+        if phase == "repair_reason_score":
+            repair_ce, repair_context = _reason_ce(
+                model, repair_context, repair_reason_ids, special_tokens
+            )
+            repair_score, repair_score_pred = _score_loss(
+                model, repair_context, score_label
+            )
+            losses.update(
+                repair_reason=repair_ce,
+                repair_score=repair_score,
+                repair_score_pred=repair_score_pred.detach(),
+            )
+            return losses
+
+        # Recreate the exact teacher-forced reason context needed by the
+        # image-flow objective, without retaining LM logits for a CE loss.
+        _update_text(
+            model,
+            repair_context,
+            repair_reason_ids,
+            special_tokens,
+            return_hidden=False,
         )
         repair_flow = _flow_loss(
             model,
@@ -554,12 +572,7 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
             special_tokens,
             "repair",
         )
-        losses.update(
-            repair_flow=repair_flow,
-            repair_reason=repair_ce,
-            repair_score=repair_score,
-            repair_score_pred=repair_score_pred.detach(),
-        )
+        losses.update(repair_flow=repair_flow)
         return losses
 
     # Inference-faithful Task-1 prefill and autoregressive reason are discrete
