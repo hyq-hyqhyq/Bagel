@@ -10,6 +10,7 @@ RUN_NAME=${RUN_NAME:-perspective_e2e_k4_30k_4gpu}
 RESULTS_DIR=${RESULTS_DIR:-/data/bagel/repo/Bagel/results/$RUN_NAME}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$RESULTS_DIR/checkpoints}
 DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_e2e.yaml}
+BACKWARD_PREFETCH=${BACKWARD_PREFETCH:-BACKWARD_PRE}
 
 test -s "$DATA_PATH/train.jsonl" || {
   echo "Missing training metadata: $DATA_PATH/train.jsonl" >&2
@@ -45,6 +46,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --lr 2e-5 --lr_scheduler constant --warmup_steps 500 --total_steps 30000 \
   --save_every 2000 --log_every 1 --gradient_accumulation_steps 1 \
   --num_shard 4 --num_replicate 1 --sharding_strategy HYBRID_SHARD \
+  --backward_prefetch "$BACKWARD_PREFETCH" \
   --max_latent_size 64 --num_workers 1 --prefetch_factor 2 \
   --wandb_offline False --wandb_project bagel --wandb_name "$RUN_NAME" \
   --wandb_runid "${WANDB_RUNID:-perspective-e2e-k4-v1}" --wandb_resume allow \

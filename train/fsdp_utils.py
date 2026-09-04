@@ -49,6 +49,20 @@ class FSDPConfig:
         self.num_shard = num_shard
 
 
+def _resolve_backward_prefetch(value):
+    """Map the CLI value to FSDP's enum, allowing prefetch to be disabled."""
+    if value is None or str(value).upper() in {"NONE", "NO_PREFETCH"}:
+        return None
+    try:
+        return BackwardPrefetch[str(value).upper()]
+    except KeyError as exc:
+        choices = ", ".join(item.name for item in BackwardPrefetch)
+        raise ValueError(
+            f"Unknown backward_prefetch={value!r}; expected one of "
+            f"{choices}, NO_PREFETCH"
+        ) from exc
+
+
 def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
     if fsdp_config.sharding_strategy == 'HYBRID_SHARD':
         device_mesh = init_device_mesh(
@@ -81,7 +95,9 @@ def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
         ),
         device_id=dist.get_rank() % torch.cuda.device_count(),
         sharding_strategy=ShardingStrategy[fsdp_config.sharding_strategy],
-        backward_prefetch=BackwardPrefetch[fsdp_config.backward_prefetch],
+        backward_prefetch=_resolve_backward_prefetch(
+            fsdp_config.backward_prefetch
+        ),
         cpu_offload=CPUOffload(offload_params=fsdp_config.cpu_offload),
         device_mesh=device_mesh,
     )
@@ -136,7 +152,9 @@ def fsdp_with_lora_wrapper(original_model, fsdp_config, ignored_modules=[]):
         ),
         device_id=dist.get_rank() % torch.cuda.device_count(),
         sharding_strategy=ShardingStrategy[fsdp_config.sharding_strategy],
-        backward_prefetch=BackwardPrefetch[fsdp_config.backward_prefetch],
+        backward_prefetch=_resolve_backward_prefetch(
+            fsdp_config.backward_prefetch
+        ),
         cpu_offload=CPUOffload(offload_params=fsdp_config.cpu_offload),
         device_mesh=device_mesh,
     )

@@ -428,7 +428,12 @@ class TrainingArguments:
     )
     backward_prefetch: str = field(
         default="BACKWARD_PRE",
-        metadata={"help": "FSDP backward prefetch strategy (BACKWARD_PRE or NO_PREFETCH)."}
+        metadata={
+            "help": (
+                "FSDP backward prefetch strategy: BACKWARD_PRE, "
+                "BACKWARD_POST, or NO_PREFETCH."
+            )
+        }
     )
     cpu_offload: bool = field(
         default=False,
