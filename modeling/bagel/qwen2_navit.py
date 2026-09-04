@@ -209,6 +209,19 @@ class NaiveCache:
         self.key_cache = {k: None for k in range(num_layers)}
         self.value_cache = {k: None for k in range(num_layers)}
 
+    def fork(self):
+        """Return a new cache container sharing the existing KV tensors.
+
+        Activation checkpointing replays a layer's forward during backward.
+        Mutating the cache object passed to that layer would make the replay
+        observe a later sequence length. Copying only the dictionaries keeps
+        the checkpoint input immutable without cloning the (large) tensors.
+        """
+        cache = type(self)(self.num_layers)
+        cache.key_cache = self.key_cache.copy()
+        cache.value_cache = self.value_cache.copy()
+        return cache
+
     @property
     def num_layers(self):
         return len(self.key_cache)
@@ -372,6 +385,11 @@ class PackedAttention(Qwen2Attention):
         packed_attn_output = self.o_proj(packed_attn_output)
 
         if update_past_key_values:
+            # A checkpointed layer must not mutate any of its inputs. During
+            # training return a copy-on-write cache; no-grad inference keeps
+            # the original in-place fast path.
+            if torch.is_grad_enabled():
+                past_key_values = past_key_values.fork()
             past_key_values.key_cache[self.layer_idx] = merged_key_states
             past_key_values.value_cache[self.layer_idx] = merged_value_states
 
@@ -618,6 +636,11 @@ class PackedAttentionMoT(Qwen2Attention):
             packed_attn_output[packed_vae_token_indexes] = expert["o_proj"](packed_attn_output[packed_vae_token_indexes])
 
         if update_past_key_values:
+            # See PackedAttention.forward_inference: checkpoint recomputation
+            # must receive the same per-layer cache that the first forward
+            # observed, rather than a container mutated by later layers.
+            if torch.is_grad_enabled():
+                past_key_values = past_key_values.fork()
             past_key_values.key_cache[self.layer_idx] = merged_key_states
             past_key_values.value_cache[self.layer_idx] = merged_value_states
 
