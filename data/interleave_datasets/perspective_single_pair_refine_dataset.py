@@ -15,13 +15,16 @@ from ..reason_heatmap_prompts import (
 
 
 class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
-    """Emit an exact 2:1:1 single-heatmap/pair-heatmap/refine task mix.
+    """Emit a configurable single-heatmap/pair-heatmap/refine task mix.
 
-    Each source row expands to eight samples. Single-good and single-bad are
-    emitted twice each, while pair-good, pair-bad, good-refine, and bad-refine
-    are emitted once each. This gives a 25/25/12.5/12.5/12.5/12.5 percent
-    sample mix without changing the legacy reason-heatmap dataset behavior.
+    The legacy behavior remains a 2:1:1 mix without reason supervision. New
+    experiments can set ``BAGEL_PERSPECTIVE_MULTITASK_RATIO`` (for example,
+    ``4:1:1``) and enable supervised reason text with
+    ``BAGEL_PERSPECTIVE_MULTITASK_REASON=1``.
     """
+
+    _RATIO_ENV = "BAGEL_PERSPECTIVE_MULTITASK_RATIO"
+    _REASON_ENV = "BAGEL_PERSPECTIVE_MULTITASK_REASON"
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -30,6 +33,33 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 "heatmap_only; its task recipe is fixed."
             )
         super().__init__(*args, heatmap_only=False, **kwargs)
+        ratio = os.environ.get(self._RATIO_ENV, "2:1:1")
+        try:
+            task_ratio = tuple(int(value) for value in ratio.split(":"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{self._RATIO_ENV} must contain three integers, got {ratio!r}"
+            ) from exc
+        if len(task_ratio) != 3 or any(value < 0 for value in task_ratio):
+            raise ValueError(
+                f"{self._RATIO_ENV} must be SINGLE:PAIR:REFINE with three "
+                f"non-negative integers, got {ratio!r}"
+            )
+        if sum(task_ratio) == 0:
+            raise ValueError(f"{self._RATIO_ENV} cannot be 0:0:0")
+        self.task_ratio = task_ratio
+
+        reason_flag = os.environ.get(self._REASON_ENV, "0").strip().lower()
+        if reason_flag not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError(
+                f"{self._REASON_ENV} must be a boolean, got {reason_flag!r}"
+            )
+        self.include_reason = reason_flag in {"1", "true", "yes"}
+        print(
+            f"dataset-{self.dataset_name}: multitask_ratio="
+            f"{':'.join(str(value) for value in self.task_ratio)}, "
+            f"reason_supervision={self.include_reason}"
+        )
 
     def parse_row(self, row, data_dir):
         good_image = self._read_image(os.path.join(data_dir, row["good_image"]))
@@ -39,9 +69,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
         )
         black_heatmap = Image.new("RGB", good_image.size)
 
-        task_specs = [
-            # Duplicate both single-image variants to give the single task a
-            # total weight of two relative to pair and refine.
+        single_specs = [
             (
                 "single_good_heatmap",
                 "heatmap",
@@ -60,27 +88,11 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 bad_heatmap,
                 row.get("bad_score", 0.0),
             ),
-            (
-                "single_good_heatmap",
-                "heatmap",
-                "good",
-                [good_image],
-                SINGLE_HEATMAP_PROMPT,
-                black_heatmap,
-                row.get("good_score", 1.0),
-            ),
-            (
-                "single_bad_heatmap",
-                "heatmap",
-                "bad",
-                [bad_image],
-                SINGLE_HEATMAP_PROMPT,
-                bad_heatmap,
-                row.get("bad_score", 0.0),
-            ),
-            # For pair tasks the first image is always the original and the
-            # second image is always its refined reference. The target mask is
-            # aligned with the first image.
+        ]
+        # For pair tasks the first image is always the original and the second
+        # image is always its refined reference. The target mask is aligned
+        # with the first image.
+        pair_specs = [
             (
                 "pair_good_heatmap",
                 "heatmap",
@@ -99,6 +111,8 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 bad_heatmap,
                 row.get("bad_score", 0.0),
             ),
+        ]
+        refine_specs = [
             (
                 "good_refine",
                 "repair",
@@ -118,6 +132,12 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 row.get("bad_score", 0.0),
             ),
         ]
+        single_weight, pair_weight, refine_weight = self.task_ratio
+        task_specs = (
+            single_specs * single_weight
+            + pair_specs * pair_weight
+            + refine_specs * refine_weight
+        )
 
         samples = []
         for (
@@ -144,6 +164,14 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 need_loss=False,
                 enable_cfg=False,
             )
+            if self.include_reason:
+                reason = row[f"{quality}_reason"]
+                data = self._add_text(
+                    data,
+                    f"<think>{reason}</think>",
+                    need_loss=True,
+                    enable_cfg=False,
+                )
             data = self._add_image(
                 data,
                 target_image,
