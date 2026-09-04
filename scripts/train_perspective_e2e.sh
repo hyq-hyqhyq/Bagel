@@ -11,6 +11,8 @@ RESULTS_DIR=${RESULTS_DIR:-/data/bagel/repo/Bagel/results/$RUN_NAME}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$RESULTS_DIR/checkpoints}
 DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_e2e.yaml}
 BACKWARD_PREFETCH=${BACKWARD_PREFETCH:-BACKWARD_PRE}
+VAE_DECODER_CHECKPOINT=${VAE_DECODER_CHECKPOINT:-False}
+GRADIENT_DENOISE_STEPS=${GRADIENT_DENOISE_STEPS:-4}
 
 test -s "$DATA_PATH/train.jsonl" || {
   echo "Missing training metadata: $DATA_PATH/train.jsonl" >&2
@@ -38,7 +40,9 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --score_head True --split_gen_adapter_by_task True --gen_task_filter joint \
   --freeze_vae True --freeze_llm False --freeze_vit False --freeze_und False \
   --ema_enabled False \
-  --num_timesteps 50 --gradient_denoise_steps 4 --max_reason_tokens 1000 \
+  --num_timesteps 50 --gradient_denoise_steps "$GRADIENT_DENOISE_STEPS" \
+  --max_reason_tokens 1000 \
+  --vae_decoder_checkpoint "$VAE_DECODER_CHECKPOINT" \
   --cfg_text_scale 4.0 --cfg_img_scale 1.0 --timestep_shift 4.0 \
   --heatmap_flow_weight 10.0 --repair_flow_weight 1.0 \
   --heatmap_score_weight 1.0 --repair_score_weight 0.2 \

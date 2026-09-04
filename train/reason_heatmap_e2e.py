@@ -188,6 +188,7 @@ def run_e2e_training(
         "num_timesteps": training_args.num_timesteps,
         "gradient_steps": training_args.gradient_denoise_steps,
         "max_reason_tokens": training_args.max_reason_tokens,
+        "vae_decoder_checkpoint": training_args.vae_decoder_checkpoint,
         "cfg_text_scale": training_args.cfg_text_scale,
         "cfg_img_scale": training_args.cfg_img_scale,
         "timestep_shift": training_args.timestep_shift,
@@ -206,6 +207,10 @@ def run_e2e_training(
     logger.info(
         "E2E execution: repair forward/backward, release repair graph, "
         "heatmap E2E forward/backward, then one optimizer step"
+    )
+    logger.info(
+        "E2E VAE decoder activation checkpoint: %s",
+        training_args.vae_decoder_checkpoint,
     )
 
     data_status = data_status or {}

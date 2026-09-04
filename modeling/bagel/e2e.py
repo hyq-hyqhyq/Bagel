@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 from data.data_utils import patchify
 
@@ -603,9 +604,19 @@ def forward_e2e(model, inputs: Dict[str, Any], vae_model, options):
     )
     predicted_latent = unpack_latent(model, predicted_packed, image_size)
 
-    # Latent + ViT handoff: no PIL conversion and no VAE re-encode.  Decoder
+    # Latent + ViT handoff: no PIL conversion and no VAE re-encode. Decoder
     # weights remain frozen, but autograd traverses the decoder into Task 1.
-    predicted_image = vae_model.decode(predicted_latent)
+    # Non-reentrant checkpointing discards the decoder's intermediate
+    # activations and recomputes them during backward without detaching the
+    # heatmap-loss gradient from the predicted repair latent.
+    if bool(options.get("vae_decoder_checkpoint", False)):
+        predicted_image = activation_checkpoint(
+            vae_model.decode,
+            predicted_latent,
+            use_reentrant=False,
+        )
+    else:
+        predicted_image = vae_model.decode(predicted_latent)
     predicted_image = predicted_image.clamp(-1, 1)
     predicted_vit = F.interpolate(
         predicted_image.float(),
