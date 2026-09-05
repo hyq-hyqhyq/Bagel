@@ -34,8 +34,13 @@ from modeling.bagel import (
 from modeling.qwen2 import Qwen2Tokenizer
 from train.train_utils import create_logger, get_latest_ckpt
 from train.fsdp_utils import (
-    FSDPCheckpoint, FSDPConfig, grad_checkpoint_check_fn, fsdp_wrapper, 
-    fsdp_ema_setup, fsdp_ema_update,
+    FSDPCheckpoint,
+    FSDPConfig,
+    fine_grained_mot_checkpoint_check_fn,
+    fsdp_ema_setup,
+    fsdp_ema_update,
+    fsdp_wrapper,
+    grad_checkpoint_check_fn,
 )
 
 
@@ -723,12 +728,17 @@ def main(
     if ema_model is not None:
         ema_model = fsdp_ema_setup(ema_model, fsdp_config)
     fsdp_model = fsdp_wrapper(model, fsdp_config)
+    checkpoint_check_fn = (
+        fine_grained_mot_checkpoint_check_fn
+        if training_args.fsdp_fine_grained_mot
+        else grad_checkpoint_check_fn
+    )
     apply_activation_checkpointing(
         fsdp_model, 
         checkpoint_wrapper_fn=functools.partial(
             checkpoint_wrapper, checkpoint_impl=CheckpointImpl.NO_REENTRANT
         ), 
-        check_fn=grad_checkpoint_check_fn
+        check_fn=checkpoint_check_fn,
     )
 
     if dist.get_rank() == 0:

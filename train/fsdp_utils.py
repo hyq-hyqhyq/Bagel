@@ -342,6 +342,25 @@ def grad_checkpoint_check_fn(module):
     return isinstance(module, module_options)
 
 
+def fine_grained_mot_checkpoint_check_fn(module):
+    """Checkpoint inside fine-grained FSDP units, not around their parent.
+
+    Wrapping a complete MoT decoder layer in an activation checkpoint after
+    its attention and MLP children have become nested FSDP units can make
+    non-reentrant recomputation stop at different children on different data
+    ranks. That changes the collective order and deadlocks NCCL. Checkpoint
+    the expensive child modules themselves so every recomputation remains
+    inside its owning FSDP unit.
+    """
+    module_options = (
+        PackedAttentionMoT,
+        Qwen2MLP,
+        SiglipEncoderLayer,
+        MLPconnector,
+    )
+    return isinstance(module, module_options)
+
+
 def fsdp_ema_setup(ema_model, fsdp_config, ignored_modules=[]):
     for param in ema_model.parameters():
         param.requires_grad = False
