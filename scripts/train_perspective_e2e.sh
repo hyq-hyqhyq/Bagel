@@ -10,6 +10,9 @@ RUN_NAME=${RUN_NAME:-perspective_e2e_k4_30k_4gpu}
 RESULTS_DIR=${RESULTS_DIR:-/data/bagel/repo/Bagel/results/$RUN_NAME}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$RESULTS_DIR/checkpoints}
 DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_e2e.yaml}
+NPROC_PER_NODE=${NPROC_PER_NODE:-4}
+NUM_SHARD=${NUM_SHARD:-4}
+NUM_REPLICATE=${NUM_REPLICATE:-1}
 BACKWARD_PREFETCH=${BACKWARD_PREFETCH:-BACKWARD_PRE}
 FSDP_FINE_GRAINED_MOT=${FSDP_FINE_GRAINED_MOT:-False}
 VAE_DECODER_CHECKPOINT=${VAE_DECODER_CHECKPOINT:-False}
@@ -27,12 +30,20 @@ test -d "$JOINT_CHECKPOINT" || {
   exit 1
 }
 
+WORLD_SIZE=$NPROC_PER_NODE
+EXPECTED_WORLD_SIZE=$((NUM_SHARD * NUM_REPLICATE))
+if [ "$WORLD_SIZE" -ne "$EXPECTED_WORLD_SIZE" ]; then
+  echo "World-size mismatch: nproc_per_node=$WORLD_SIZE but " \
+    "num_shard*num_replicate=$EXPECTED_WORLD_SIZE" >&2
+  exit 1
+fi
+
 export BAGEL_REASON_HEATMAP_DATA_DIR="$DATA_PATH"
 export BAGEL_REASON_HEATMAP_METADATA_PATH="$DATA_PATH/train.jsonl"
 mkdir -p "$RESULTS_DIR" "$CHECKPOINT_DIR"
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
-  --nnodes=1 --node_rank=0 --nproc_per_node=4 \
+  --nnodes=1 --node_rank=0 --nproc_per_node="$NPROC_PER_NODE" \
   --master_addr=127.0.0.1 --master_port=${MASTER_PORT:-29507} \
   train/finetune_reason_heatmap_e2e.py \
   --dataset_config_file "$DATASET_CONFIG" \
@@ -56,7 +67,8 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --heatmap_reason_weight 0.25 --repair_reason_weight 0.05 \
   --lr 2e-5 --lr_scheduler constant --warmup_steps 500 --total_steps 30000 \
   --save_every 2000 --log_every 1 --gradient_accumulation_steps 1 \
-  --num_shard 4 --num_replicate 1 --sharding_strategy HYBRID_SHARD \
+  --num_shard "$NUM_SHARD" --num_replicate "$NUM_REPLICATE" \
+  --sharding_strategy HYBRID_SHARD \
   --backward_prefetch "$BACKWARD_PREFETCH" \
   --fsdp_fine_grained_mot "$FSDP_FINE_GRAINED_MOT" \
   --max_latent_size 64 --num_workers 1 --prefetch_factor 2 \
