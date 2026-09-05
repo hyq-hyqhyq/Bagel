@@ -5,6 +5,7 @@ import copy
 from typing import List, Tuple, Optional, Dict, Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import create_block_mask
@@ -1197,10 +1198,15 @@ class Bagel(PreTrainedModel):
         do_sample: bool = False,
         temperature: float = 1.0,
         end_token_id: int = None,
+        synced_gpus: bool = False,
     ):
         step = 0
         generated_sequence = []
         curr_tokens = packed_start_tokens
+        local_finished = False
+        sync_generation = (
+            synced_gpus and dist.is_available() and dist.is_initialized()
+        )
         while step < max_length:
             generated_sequence.append(curr_tokens)
             packed_text_embedding = self.language_model.model.embed_tokens(curr_tokens)
@@ -1252,8 +1258,28 @@ class Bagel(PreTrainedModel):
             packed_query_position_ids = packed_query_position_ids + 1
             step += 1
 
-            if end_token_id is not None and curr_tokens[0] == end_token_id: # only support batch=1
-                break
+            if end_token_id is not None:
+                local_finished = local_finished or bool(
+                    curr_tokens[0].item() == end_token_id
+                )
+                if sync_generation:
+                    # FSDP ranks must execute the same number of model
+                    # forwards/collectives. Finished ranks keep participating
+                    # with EOS until every rank has finished.
+                    finished_count = torch.tensor(
+                        int(local_finished),
+                        device=curr_tokens.device,
+                        dtype=torch.int32,
+                    )
+                    dist.all_reduce(finished_count, op=dist.ReduceOp.SUM)
+                    if finished_count.item() == dist.get_world_size():
+                        break
+                    if local_finished:
+                        curr_tokens = torch.full_like(
+                            curr_tokens, end_token_id
+                        )
+                elif local_finished:  # only support batch=1
+                    break
 
         output_device = generated_sequence[0].device
         return torch.stack([i.to(output_device) for i in generated_sequence], dim=0)

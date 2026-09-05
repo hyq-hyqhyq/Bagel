@@ -462,6 +462,7 @@ def _generate_reason_ids(
         do_sample=False,
         temperature=1.0,
         end_token_id=int(special_tokens["eos_token_id"]),
+        synced_gpus=True,
         **start,
     )
     decoded = tokenizer.decode(generated[:, 0])

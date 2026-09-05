@@ -740,6 +740,14 @@ def main(
         ), 
         check_fn=checkpoint_check_fn,
     )
+    logger.info(
+        "Activation checkpoint granularity: %s",
+        (
+            "MoT attention/MLP FSDP children"
+            if training_args.fsdp_fine_grained_mot
+            else "transformer layers"
+        ),
+    )
 
     if dist.get_rank() == 0:
         print(fsdp_model)
