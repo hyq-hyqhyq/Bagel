@@ -13,6 +13,7 @@ DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_e2e.yaml}
 BACKWARD_PREFETCH=${BACKWARD_PREFETCH:-BACKWARD_PRE}
 FSDP_FINE_GRAINED_MOT=${FSDP_FINE_GRAINED_MOT:-False}
 VAE_DECODER_CHECKPOINT=${VAE_DECODER_CHECKPOINT:-False}
+E2E_EMPTY_CACHE=${E2E_EMPTY_CACHE:-False}
 GRADIENT_DENOISE_STEPS=${GRADIENT_DENOISE_STEPS:-4}
 
 test -s "$DATA_PATH/train.jsonl" || {
@@ -44,6 +45,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --num_timesteps 50 --gradient_denoise_steps "$GRADIENT_DENOISE_STEPS" \
   --max_reason_tokens 1000 \
   --vae_decoder_checkpoint "$VAE_DECODER_CHECKPOINT" \
+  --e2e_empty_cache "$E2E_EMPTY_CACHE" \
   --cfg_text_scale 4.0 --cfg_img_scale 1.0 --timestep_shift 4.0 \
   --heatmap_flow_weight 10.0 --repair_flow_weight 1.0 \
   --heatmap_score_weight 1.0 --repair_score_weight 0.2 \

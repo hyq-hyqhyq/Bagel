@@ -106,6 +106,14 @@ def _to_device(value, device):
     return value
 
 
+def _release_phase_cache(enabled):
+    """Release only unreachable/cached allocations between E2E phases."""
+    if not enabled:
+        return
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def _prepare_e2e_inputs(data, vae_model, device):
     data = dict(data)
     data_indexes = data.pop("data_indexes", None)
@@ -214,6 +222,10 @@ def run_e2e_training(
         "E2E VAE decoder activation checkpoint: %s",
         training_args.vae_decoder_checkpoint,
     )
+    logger.info(
+        "E2E phase-boundary CUDA cache release: %s",
+        training_args.e2e_empty_cache,
+    )
 
     data_status = data_status or {}
     optimizer.zero_grad()
@@ -260,6 +272,7 @@ def run_e2e_training(
             repair_reason_score_total_loss,
             repair_reason_score_scaled_loss,
         )
+        _release_phase_cache(training_args.e2e_empty_cache)
 
         # Phase 2: rebuild the teacher-forced repair prefix and supervise only
         # flow matching. The phase-1 graph has already been released.
@@ -292,6 +305,7 @@ def run_e2e_training(
             repair_flow_total_loss,
             repair_flow_scaled_loss,
         )
+        _release_phase_cache(training_args.e2e_empty_cache)
 
         # Phase 3: construct a fresh Task-1 sampling -> differentiable VAE
         # decode -> ViT -> Task-2 heatmap graph. The heatmap losses remain
@@ -312,6 +326,12 @@ def run_e2e_training(
                 heatmap_total_loss
                 / training_args.gradient_accumulation_steps
             )
+        # The complete heatmap graph is still live here. empty_cache() does
+        # not touch it or the gradients accumulated by phases 1 and 2; it
+        # only returns fragmented, unused allocator blocks before backward's
+        # FSDP all-gathers request their contiguous buffers.
+        if training_args.e2e_empty_cache:
+            torch.cuda.empty_cache()
         heatmap_scaled_loss.backward()
         loss_values.update(
             {
