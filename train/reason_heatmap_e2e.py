@@ -270,7 +270,7 @@ def run_e2e_training(
         training_args.e2e_cpu_gradient_staging,
     )
     logger.info(
-        "E2E heatmap activation CPU offload: %s",
+        "E2E repair-flow + heatmap activation CPU offload: %s",
         training_args.e2e_activation_cpu_offload,
     )
 
@@ -326,9 +326,16 @@ def run_e2e_training(
 
         # Phase 2: rebuild the teacher-forced repair prefix and supervise only
         # flow matching. The phase-1 graph has already been released.
+        repair_activation_offload_context = (
+            torch.autograd.graph.save_on_cpu(
+                pin_memory=True, device_type="cuda"
+            )
+            if training_args.e2e_activation_cpu_offload
+            else nullcontext()
+        )
         with torch.amp.autocast(
             "cuda", enabled=True, dtype=torch.bfloat16
-        ):
+        ), repair_activation_offload_context:
             repair_flow_loss_dict = fsdp_model(
                 e2e_inputs=data,
                 e2e_vae_model=vae_model,
