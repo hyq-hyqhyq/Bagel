@@ -4,6 +4,7 @@
 
 import gc
 import os
+from contextlib import nullcontext
 from time import time
 
 import torch
@@ -268,6 +269,10 @@ def run_e2e_training(
         "E2E CPU gradient staging: %s",
         training_args.e2e_cpu_gradient_staging,
     )
+    logger.info(
+        "E2E heatmap activation CPU offload: %s",
+        training_args.e2e_activation_cpu_offload,
+    )
 
     data_status = data_status or {}
     optimizer.zero_grad()
@@ -357,9 +362,16 @@ def run_e2e_training(
         # Phase 3: construct a fresh Task-1 sampling -> differentiable VAE
         # decode -> ViT -> Task-2 heatmap graph. The heatmap losses remain
         # connected to the final K Task-1 denoising updates.
+        activation_offload_context = (
+            torch.autograd.graph.save_on_cpu(
+                pin_memory=True, device_type="cuda"
+            )
+            if training_args.e2e_activation_cpu_offload
+            else nullcontext()
+        )
         with torch.amp.autocast(
             "cuda", enabled=True, dtype=torch.bfloat16
-        ):
+        ), activation_offload_context:
             heatmap_loss_dict = fsdp_model(
                 e2e_inputs=data,
                 e2e_vae_model=vae_model,
