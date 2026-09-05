@@ -11,6 +11,7 @@ RESULTS_DIR=${RESULTS_DIR:-/data/bagel/repo/Bagel/results/$RUN_NAME}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-$RESULTS_DIR/checkpoints}
 DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_e2e.yaml}
 BACKWARD_PREFETCH=${BACKWARD_PREFETCH:-BACKWARD_PRE}
+FSDP_FINE_GRAINED_MOT=${FSDP_FINE_GRAINED_MOT:-False}
 VAE_DECODER_CHECKPOINT=${VAE_DECODER_CHECKPOINT:-False}
 GRADIENT_DENOISE_STEPS=${GRADIENT_DENOISE_STEPS:-4}
 
@@ -51,6 +52,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --save_every 2000 --log_every 1 --gradient_accumulation_steps 1 \
   --num_shard 4 --num_replicate 1 --sharding_strategy HYBRID_SHARD \
   --backward_prefetch "$BACKWARD_PREFETCH" \
+  --fsdp_fine_grained_mot "$FSDP_FINE_GRAINED_MOT" \
   --max_latent_size 64 --num_workers 1 --prefetch_factor 2 \
   --wandb_offline False --wandb_project bagel --wandb_name "$RUN_NAME" \
   --wandb_runid "${WANDB_RUNID:-perspective-e2e-k4-v1}" --wandb_resume allow \

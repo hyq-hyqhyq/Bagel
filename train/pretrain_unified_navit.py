@@ -435,6 +435,15 @@ class TrainingArguments:
             )
         }
     )
+    fsdp_fine_grained_mot: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Wrap MoT attention and MLP children as nested FSDP units "
+                "to reduce the maximum parameter all-gather allocation."
+            )
+        },
+    )
     cpu_offload: bool = field(
         default=False,
         metadata={"help": "Enable FSDP parameter offload to CPU."}
@@ -683,6 +692,11 @@ def main(
         cpu_offload=training_args.cpu_offload,
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
+        fine_grained_mot=training_args.fsdp_fine_grained_mot,
+    )
+    logger.info(
+        "FSDP fine-grained MoT wrapping: %s",
+        training_args.fsdp_fine_grained_mot,
     )
     ema_model = deepcopy(model) if training_args.ema_enabled else None
     checkpoint_exists = resume_from is not None and os.path.exists(resume_from)

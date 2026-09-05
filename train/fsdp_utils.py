@@ -26,10 +26,12 @@ from safetensors.torch import load_file, save_file
 
 from modeling.bagel.modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
 from modeling.bagel.qwen2_navit import (
+    PackedAttentionMoT,
     Qwen2DecoderLayer, 
     Qwen2MoEDecoderLayer, 
     Qwen2MoTDecoderLayer,
 )
+from modeling.qwen2.modeling_qwen2 import Qwen2MLP
 from modeling.bagel.siglip_navit import SiglipEncoderLayer, SiglipVisionTransformer
 
 
@@ -41,12 +43,14 @@ class FSDPConfig:
         cpu_offload, 
         num_replicate,
         num_shard=8,
+        fine_grained_mot=False,
     ):
         self.sharding_strategy = sharding_strategy
         self.backward_prefetch = backward_prefetch
         self.cpu_offload = cpu_offload
         self.num_replicate = num_replicate
         self.num_shard = num_shard
+        self.fine_grained_mot = fine_grained_mot
 
 
 def _resolve_backward_prefetch(value):
@@ -72,20 +76,29 @@ def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
         )
     else:
         device_mesh = None
+    transformer_layer_cls = {
+        Qwen2DecoderLayer,
+        Qwen2MoEDecoderLayer,
+        Qwen2MoTDecoderLayer,
+        SiglipEncoderLayer,
+        SiglipVisionTransformer,
+        MLPconnector,
+        TimestepEmbedder,
+        PositionEmbedding,
+    }
+    if fsdp_config.fine_grained_mot:
+        # Keep the decoder-layer wrapper for checkpoint compatibility, but
+        # also shard its large attention and MLP children independently.
+        # The outer layer then owns only small unwrapped parameters such as
+        # norms, while backward all-gathers remain well below a full MoT
+        # layer's flat-parameter size.
+        transformer_layer_cls.update({PackedAttentionMoT, Qwen2MLP})
+
     return FSDP(
         original_model,
         auto_wrap_policy=functools.partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                Qwen2DecoderLayer,
-                Qwen2MoEDecoderLayer,
-                Qwen2MoTDecoderLayer,
-                SiglipEncoderLayer,
-                SiglipVisionTransformer,
-                MLPconnector,
-                TimestepEmbedder,
-                PositionEmbedding,
-            },
+            transformer_layer_cls=transformer_layer_cls,
         ),
         ignored_modules=ignored_modules,
         mixed_precision=MixedPrecision(
