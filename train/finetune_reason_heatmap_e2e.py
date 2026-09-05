@@ -37,6 +37,7 @@ class E2ETrainingArguments(TrainingArguments):
     max_reason_tokens: int = field(default=1000)
     vae_decoder_checkpoint: bool = field(default=False)
     e2e_empty_cache: bool = field(default=False)
+    e2e_cpu_gradient_staging: bool = field(default=False)
     cfg_text_scale: float = field(default=4.0)
     cfg_img_scale: float = field(default=1.0)
     timestep_shift: float = field(default=4.0)

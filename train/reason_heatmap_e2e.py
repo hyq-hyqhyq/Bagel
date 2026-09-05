@@ -114,6 +114,44 @@ def _release_phase_cache(enabled):
     torch.cuda.empty_cache()
 
 
+def _stage_parameter_gradients(model, staged_gradients):
+    """Accumulate this rank's reduced FSDP gradients in CPU memory."""
+    for parameter in model.parameters():
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        cpu_gradient = gradient.detach().to(
+            device="cpu", non_blocking=False, copy=True
+        )
+        parameter_id = id(parameter)
+        if parameter_id in staged_gradients:
+            staged_gradients[parameter_id][1].add_(cpu_gradient)
+        else:
+            staged_gradients[parameter_id] = [parameter, cpu_gradient]
+        parameter.grad = None
+
+
+def _restore_parameter_gradients(staged_gradients):
+    """Add CPU-staged repair gradients to the live heatmap gradients."""
+    for parameter, cpu_gradient in staged_gradients.values():
+        target_dtype = (
+            parameter.grad.dtype
+            if parameter.grad is not None
+            else parameter.dtype
+        )
+        restored_gradient = cpu_gradient.to(
+            device=parameter.device,
+            dtype=target_dtype,
+            non_blocking=False,
+        )
+        if parameter.grad is None:
+            parameter.grad = restored_gradient
+        else:
+            parameter.grad.add_(restored_gradient)
+        del restored_gradient
+    staged_gradients.clear()
+
+
 def _prepare_e2e_inputs(data, vae_model, device):
     data = dict(data)
     data_indexes = data.pop("data_indexes", None)
@@ -226,6 +264,10 @@ def run_e2e_training(
         "E2E phase-boundary CUDA cache release: %s",
         training_args.e2e_empty_cache,
     )
+    logger.info(
+        "E2E CPU gradient staging: %s",
+        training_args.e2e_cpu_gradient_staging,
+    )
 
     data_status = data_status or {}
     optimizer.zero_grad()
@@ -238,6 +280,7 @@ def run_e2e_training(
         if completed_step >= training_args.total_steps:
             break
         data, data_indexes = _prepare_e2e_inputs(raw_data, vae_model, device)
+        staged_gradients = {}
 
         # Phase 1: teacher-forced repair reason and score. Do not clear
         # gradients between phases: all three accumulate into the same
@@ -267,6 +310,8 @@ def run_e2e_training(
         repair_reason_score_total_value = (
             repair_reason_score_total_loss.detach()
         )
+        if training_args.e2e_cpu_gradient_staging:
+            _stage_parameter_gradients(fsdp_model, staged_gradients)
         del (
             repair_reason_score_loss_dict,
             repair_reason_score_total_loss,
@@ -300,6 +345,8 @@ def run_e2e_training(
             }
         )
         repair_flow_total_value = repair_flow_total_loss.detach()
+        if training_args.e2e_cpu_gradient_staging:
+            _stage_parameter_gradients(fsdp_model, staged_gradients)
         del (
             repair_flow_loss_dict,
             repair_flow_total_loss,
@@ -346,6 +393,13 @@ def run_e2e_training(
             + heatmap_total_value
         )
         del heatmap_loss_dict, heatmap_total_loss, heatmap_scaled_loss
+        if training_args.e2e_cpu_gradient_staging:
+            # Backward has released the heatmap graph. Return unused CUDA
+            # blocks before restoring the smaller, sharded gradient buffers
+            # one at a time and adding the repair gradients exactly once.
+            gc.collect()
+            torch.cuda.empty_cache()
+            _restore_parameter_gradients(staged_gradients)
 
         optimizer_updated = (
             (micro_step + 1) % training_args.gradient_accumulation_steps == 0
