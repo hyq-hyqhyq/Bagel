@@ -12,6 +12,8 @@ DATASET_CONFIG=${DATASET_CONFIG:-./data/configs/perspective_single_pair_refine.y
 WANDB_NAME=${WANDB_NAME:-$RUN_NAME}
 WANDB_RUNID=${WANDB_RUNID:-perspective-single-pair-refine-2-1-1-v1}
 FOREGROUND_BALANCED_HEATMAP_MSE=${FOREGROUND_BALANCED_HEATMAP_MSE:-False}
+REPAIR_MSE_WEIGHT=${REPAIR_MSE_WEIGHT:-1}
+HEATMAP_MSE_WEIGHT=${HEATMAP_MSE_WEIGHT:-10}
 
 test -s "$DATA_PATH/train.jsonl" || {
   echo "Missing training metadata: $DATA_PATH/train.jsonl" >&2
@@ -36,6 +38,8 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} nohup torchrun \
   --split_gen_adapter_by_task True --gen_task_filter joint \
   --freeze_vae True --freeze_llm False --freeze_vit False --freeze_und False \
   --ce_weight 0.25 --mse_weight 10 \
+  --repair_mse_weight "$REPAIR_MSE_WEIGHT" \
+  --heatmap_mse_weight "$HEATMAP_MSE_WEIGHT" \
   --foreground_balanced_heatmap_mse "$FOREGROUND_BALANCED_HEATMAP_MSE" \
   --text_cond_dropout_prob 0.05 --vae_cond_dropout_prob 0.1 \
   --vit_cond_dropout_prob 0.1 --timestep_shift 4.0 \
