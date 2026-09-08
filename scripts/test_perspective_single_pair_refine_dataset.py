@@ -70,6 +70,9 @@ class PerspectiveSinglePairRefineDatasetTest(unittest.TestCase):
         self.dataset.transform = MarkerTransform()
         self.dataset.vit_transform = MarkerTransform()
         self.dataset.tokenizer = self.tokenizer
+        self.dataset.task_ratio = (2, 1, 1)
+        self.dataset.include_reason = False
+        self.dataset.disable_heatmap_visual_dropout = False
         self.dataset._read_image = (
             lambda image_path: images[Path(image_path).name].copy()
         )
@@ -175,6 +178,41 @@ If no correction is necessary, preserve the input image unchanged.""",
             ]
             self.assertEqual(len(text_items), 1)
             self.assertEqual(text_items[0]["loss"], 0)
+
+    def test_visual_dropout_can_be_disabled_only_for_heatmap(self):
+        self.dataset.disable_heatmap_visual_dropout = True
+        samples = self.dataset.parse_row(self.row, "unused")
+
+        for sample in samples:
+            conditioning_images = [
+                item
+                for item in sample["sequence_plan"]
+                if item["type"] in {"vae_image", "vit_image"}
+                and item["loss"] == 0
+            ]
+            expected_enable_cfg = int(sample["gen_task"] == "repair")
+            self.assertTrue(conditioning_images)
+            self.assertTrue(
+                all(
+                    item["enable_cfg"] == expected_enable_cfg
+                    for item in conditioning_images
+                )
+            )
+
+    def test_visual_dropout_remains_enabled_by_default(self):
+        samples = self.dataset.parse_row(self.row, "unused")
+
+        for sample in samples:
+            conditioning_images = [
+                item
+                for item in sample["sequence_plan"]
+                if item["type"] in {"vae_image", "vit_image"}
+                and item["loss"] == 0
+            ]
+            self.assertTrue(conditioning_images)
+            self.assertTrue(
+                all(item["enable_cfg"] == 1 for item in conditioning_images)
+            )
 
 
 if __name__ == "__main__":

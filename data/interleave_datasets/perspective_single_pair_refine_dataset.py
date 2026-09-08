@@ -25,6 +25,9 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
 
     _RATIO_ENV = "BAGEL_PERSPECTIVE_MULTITASK_RATIO"
     _REASON_ENV = "BAGEL_PERSPECTIVE_MULTITASK_REASON"
+    _DISABLE_HEATMAP_VISUAL_DROPOUT_ENV = (
+        "BAGEL_PERSPECTIVE_DISABLE_HEATMAP_VISUAL_DROPOUT"
+    )
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -55,10 +58,26 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 f"{self._REASON_ENV} must be a boolean, got {reason_flag!r}"
             )
         self.include_reason = reason_flag in {"1", "true", "yes"}
+
+        disable_visual_dropout_flag = os.environ.get(
+            self._DISABLE_HEATMAP_VISUAL_DROPOUT_ENV, "0"
+        ).strip().lower()
+        if disable_visual_dropout_flag not in {
+            "0", "1", "false", "true", "no", "yes"
+        }:
+            raise ValueError(
+                f"{self._DISABLE_HEATMAP_VISUAL_DROPOUT_ENV} must be a "
+                f"boolean, got {disable_visual_dropout_flag!r}"
+            )
+        self.disable_heatmap_visual_dropout = (
+            disable_visual_dropout_flag in {"1", "true", "yes"}
+        )
         print(
             f"dataset-{self.dataset_name}: multitask_ratio="
             f"{':'.join(str(value) for value in self.task_ratio)}, "
-            f"reason_supervision={self.include_reason}"
+            f"reason_supervision={self.include_reason}, "
+            "disable_heatmap_visual_dropout="
+            f"{self.disable_heatmap_visual_dropout}"
         )
 
     def parse_row(self, row, data_dir):
@@ -150,6 +169,10 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
             score_label,
         ) in task_specs:
             data = self._init_data()
+            enable_visual_cfg = not (
+                gen_task == "heatmap"
+                and self.disable_heatmap_visual_dropout
+            )
             for input_image in input_images:
                 data = self._add_image(
                     data,
@@ -157,6 +180,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                     need_loss=False,
                     need_vae=True,
                     need_vit=True,
+                    enable_cfg=enable_visual_cfg,
                 )
             data = self._add_text(
                 data,

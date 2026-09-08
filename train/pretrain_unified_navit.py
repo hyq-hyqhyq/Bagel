@@ -383,6 +383,12 @@ class TrainingArguments:
         default=None,
         metadata={"help": "Scaling factor for heatmap image MSE; defaults to mse_weight."}
     )
+    foreground_balanced_heatmap_mse: bool = field(
+        default=False,
+        metadata={
+            "help": "Balance foreground and background token contributions within bad heatmap flow MSE."
+        },
+    )
     ce_weight: float = field(
         default=1.0,
         metadata={"help": "Scaling factor for the language cross-entropy loss term."}
@@ -829,6 +835,9 @@ def main(
             use_flex=training_args.use_flex,
             split_gen_adapter_by_task=training_args.split_gen_adapter_by_task,
             gen_task_filter=training_args.gen_task_filter,
+            foreground_balanced_heatmap_mse=(
+                training_args.foreground_balanced_heatmap_mse
+            ),
             data_status=data_status,
         )
         train_dataset.set_epoch(data_args.data_seed)
@@ -891,6 +900,7 @@ def main(
         data = data.cuda(device).to_dict()
         data_indexes = data.pop('batch_data_indexes', None)
         ce_loss_weights = data.pop('ce_loss_weights', None)       
+        mse_foreground_labels = data.pop('mse_foreground_labels', None)
         tokens_tensor = torch.tensor(float(data['sequence_length']), device=device)
         dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
         token_window += tokens_tensor.item()
@@ -966,10 +976,14 @@ def main(
                     training_args.repair_mse_weight is not None
                     or training_args.heatmap_mse_weight is not None
                 )
-                if use_task_specific_mse_weights:
+                use_weighted_mse = (
+                    use_task_specific_mse_weights
+                    or training_args.foreground_balanced_heatmap_mse
+                )
+                if use_weighted_mse:
                     if mse_task_labels is None or mse_per_token is None:
                         raise ValueError(
-                            "Task-specific MSE weights require generation task labels"
+                            "Weighted MSE requires generation task labels"
                         )
                     per_token_mse = mse_per_token.mean(dim=-1)
                     if len(mse_task_labels) != len(per_token_mse):
@@ -985,6 +999,45 @@ def main(
                         per_token_mse.new_tensor(repair_mse_weight),
                         per_token_mse.new_tensor(heatmap_mse_weight),
                     )
+                    if training_args.foreground_balanced_heatmap_mse:
+                        if (
+                            mse_foreground_labels is None
+                            or len(mse_foreground_labels) != len(per_token_mse)
+                        ):
+                            raise ValueError(
+                                "Foreground-balanced heatmap MSE requires one "
+                                "foreground label per generation token"
+                            )
+                        bad_heatmap_mask = mse_task_labels == 3
+                        foreground_mask = (
+                            bad_heatmap_mask & mse_foreground_labels
+                        )
+                        background_mask = (
+                            bad_heatmap_mask & ~mse_foreground_labels
+                        )
+                        foreground_count = foreground_mask.sum()
+                        background_count = background_mask.sum()
+                        dist.all_reduce(foreground_count, op=dist.ReduceOp.SUM)
+                        dist.all_reduce(background_count, op=dist.ReduceOp.SUM)
+                        if (
+                            foreground_count.item() > 0
+                            and background_count.item() > 0
+                        ):
+                            bad_heatmap_count = (
+                                foreground_count + background_count
+                            )
+                            balance_weights = torch.ones_like(per_token_mse)
+                            balance_weights[foreground_mask] = (
+                                bad_heatmap_count / (2 * foreground_count)
+                            )
+                            balance_weights[background_mask] = (
+                                bad_heatmap_count / (2 * background_count)
+                            )
+                            token_weights = token_weights * balance_weights
+                        loss_dict["bad_heatmap_foreground_fraction"] = (
+                            foreground_count.float()
+                            / (foreground_count + background_count).clamp_min(1)
+                        ).detach()
                     weighted_mse_sum = (per_token_mse * token_weights).sum()
                     weighted_mse = (
                         weighted_mse_sum
