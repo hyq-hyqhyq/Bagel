@@ -135,8 +135,14 @@ def main() -> None:
     ap.add_argument("--stage1-model", default="gpt-5.6-sol")
     ap.add_argument("--stage2-model", default="gpt-image-2")
     ap.add_argument("--only", choices=["all", "good", "bad"], default="all")
+    ap.add_argument("--selection-json", type=Path, default=None,
+                    help="Optional JSON with train_selected_ids/test_selected_ids.")
     args = ap.parse_args(); root = extract_if_needed(args.archive.resolve(), args.cache_root.resolve())
     out = args.output_root.resolve(); out.mkdir(parents=True, exist_ok=True)
+    selected = None
+    if args.selection_json:
+        selected = json.loads(args.selection_json.read_text(encoding="utf8"))
+        selected = {str(x) for split in ("train_selected_ids", "test_selected_ids") for x in selected.get(split, [])}
     records = []
     split_files = sorted((root / "metadata").glob("*.jsonl"))
     if not split_files: raise SystemExit(f"No metadata jsonl found under {root / 'metadata'}")
@@ -145,6 +151,8 @@ def main() -> None:
         for line in split_file.read_text(encoding="utf8").splitlines():
             if not line.strip(): continue
             m = json.loads(line)
+            if selected is not None and str(m.get("group_id")) not in selected:
+                continue
             for label in ("good", "bad"):
                 if args.only != "all" and label != args.only: continue
                 rel = m[f"{label}_image"]; records.append({"split": split, "label": label, "group_id": m.get("group_id"), "category": m.get("intended_category"), "path": str((root / rel).resolve())})
