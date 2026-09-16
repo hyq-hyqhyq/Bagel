@@ -16,7 +16,7 @@ For each item, compare the MODEL explanation with the corresponding GROUND-TRUTH
 Judge whether the MODEL explanation correctly identifies the same visible perspective issue (or correctly says there is no clear issue), focusing on the affected structure and the violated or preserved projection relationship. Paraphrasing is allowed; do not require identical wording. Mark incorrect if it contradicts the ground truth, misses the central issue, or invents an unrelated issue.
 
 Return ONLY valid JSON in this exact shape:
-{"results":[{"id":"...","correct":true,"verdict":"correct"},{"id":"...","correct":false,"verdict":"incorrect"}]}
+{{"results":[{{"id":"...","correct":true,"verdict":"correct"}},{{"id":"...","correct":false,"verdict":"incorrect"}}]}}
 Include exactly one result for every item and preserve each id.
 
 Items:
