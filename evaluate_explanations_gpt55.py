@@ -34,11 +34,13 @@ def keys() -> list[str]:
 
 def load_gt(archive: Path) -> dict[str, dict[str, Any]]:
     with tarfile.open(archive, "r:gz") as tf:
-        names = [n for n in tf.getnames() if n.endswith("/metadata/test.jsonl")]
-        if not names: raise SystemExit("metadata/test.jsonl not found in archive")
-        raw = tf.extractfile(names[0])
-        assert raw is not None
-        rows = [json.loads(x) for x in raw.read().decode("utf8").splitlines() if x.strip()]
+        names = sorted(n for n in tf.getnames() if "/metadata/" in n and n.endswith(".jsonl"))
+        if not names: raise SystemExit("metadata jsonl not found in archive")
+        rows = []
+        for name in names:
+            raw = tf.extractfile(name)
+            assert raw is not None
+            rows.extend(json.loads(x) for x in raw.read().decode("utf8").splitlines() if x.strip())
     out = {}
     for row in rows:
         gid = str(row.get("group_id"))
