@@ -135,6 +135,7 @@ def main() -> None:
     ap.add_argument("--stage1-model", default="gpt-5.6-sol")
     ap.add_argument("--stage2-model", default="gpt-image-2")
     ap.add_argument("--only", choices=["all", "good", "bad"], default="all")
+    ap.add_argument("--split", choices=["all", "train", "test"], default="all")
     ap.add_argument("--selection-json", type=Path, default=None,
                     help="Optional JSON with train_selected_ids/test_selected_ids.")
     args = ap.parse_args(); root = extract_if_needed(args.archive.resolve(), args.cache_root.resolve())
@@ -148,6 +149,8 @@ def main() -> None:
     if not split_files: raise SystemExit(f"No metadata jsonl found under {root / 'metadata'}")
     for split_file in split_files:
         split = "train" if "train" in split_file.name.lower() else "test"
+        if args.split != "all" and split != args.split:
+            continue
         for line in split_file.read_text(encoding="utf8").splitlines():
             if not line.strip(): continue
             m = json.loads(line)
