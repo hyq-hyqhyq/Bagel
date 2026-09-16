@@ -11,9 +11,10 @@ from typing import Any
 
 from openai import OpenAI
 
-JUDGE_PROMPT = """You are evaluating perspective/projection explanations.
+JUDGE_PROMPT = """You are evaluating perspective/projection explanations with a lenient semantic criterion.
 For each item, compare the MODEL explanation with the corresponding GROUND-TRUTH explanation.
-Judge whether the MODEL explanation correctly identifies the same visible perspective issue (or correctly says there is no clear issue), focusing on the affected structure and the violated or preserved projection relationship. Paraphrasing is allowed; do not require identical wording. Mark incorrect if it contradicts the ground truth, misses the central issue, or invents an unrelated issue.
+Mark the MODEL explanation correct when its main error subject/structure is approximately the same as the ground truth and it reaches the same overall perspective conclusion. Broadly matching the affected object, part, or local region is sufficient. Paraphrasing, different surrounding reference structures, different levels of detail, and minor coordinate/edge differences are acceptable. For a ground truth saying no clear error, a model explanation that also says no clear error is correct.
+Mark incorrect only when the model identifies a substantially different object/region, reverses the main conclusion (error vs no error), contradicts the ground truth, or describes an unrelated visual issue. Do not require identical wording or every supporting cue.
 
 Return ONLY valid JSON in this exact shape:
 {{"results":[{{"id":"...","correct":true,"verdict":"correct"}},{{"id":"...","correct":false,"verdict":"incorrect"}}]}}
