@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=28)
     p.add_argument("--cfg", type=float, default=4.0)
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--splits", nargs="+", default=["train", "test"], choices=["train", "test"])
     return p.parse_args()
 
 
@@ -58,8 +59,14 @@ def main() -> None:
     a = parse_args()
     if not (0 <= a.shard_index < a.num_shards): raise SystemExit("invalid shard index")
     root, out = a.data_root.resolve(), a.output_root.resolve(); out.mkdir(parents=True, exist_ok=True)
-    manifest = root / "metadata" / "test.jsonl"
-    rows = [json.loads(x) for x in manifest.read_text(encoding="utf8").splitlines() if x.strip()]
+    rows = []
+    for split in a.splits:
+        manifest = root / "metadata" / f"{split}.jsonl"
+        if not manifest.is_file():
+            raise SystemExit(f"missing metadata: {manifest}")
+        for x in manifest.read_text(encoding="utf8").splitlines():
+            if x.strip():
+                row = json.loads(x); row["_split"] = split; rows.append(row)
     items = [(row, label, root / row[f"{label}_image"]) for row in rows for label in ("good", "bad")]
     items = [x for i, x in enumerate(items) if i % a.num_shards == a.shard_index]
     print(f"shard={a.shard_index}/{a.num_shards} items={len(items)}", flush=True)
@@ -70,16 +77,16 @@ def main() -> None:
     if a.resume and log.exists():
         for line in log.read_text(encoding="utf8").splitlines():
             try:
-                r=json.loads(line); done[(r["group_id"],r["label"])] = r
+                r=json.loads(line); done[(r.get("split", "test"), r["group_id"],r["label"])] = r
             except Exception: pass
     with log.open("a", encoding="utf8") as fh:
         for n, (row, label, image) in enumerate(items, 1):
-            key=(row["group_id"],label); rec={"group_id":row["group_id"],"label":label,"category":row.get("intended_category"),"image":str(image)}
+            key=(row["_split"], row["group_id"],label); rec={"split":row["_split"],"group_id":row["group_id"],"label":label,"category":row.get("intended_category"),"image":str(image)}
             if a.resume and key in done and done[key].get("status")=="ok": continue
             try:
                 explanation = planner._generate(image, STAGE1)
                 rec["explanation"] = explanation.strip()
-                raw_dir = out / "raw" / label; mask_dir = out / "masks" / label; raw_dir.mkdir(parents=True, exist_ok=True); mask_dir.mkdir(parents=True, exist_ok=True)
+                raw_dir = out / "raw" / row["_split"] / label; mask_dir = out / "masks" / row["_split"] / label; raw_dir.mkdir(parents=True, exist_ok=True); mask_dir.mkdir(parents=True, exist_ok=True)
                 raw = raw_dir / f"{row['group_id']}.png"; mask = mask_dir / f"{row['group_id']}.png"
                 edit.edit(image, STAGE2.format(explanation=rec["explanation"]), raw)
                 with Image.open(image) as src: size=src.size
