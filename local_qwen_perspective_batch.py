@@ -71,7 +71,7 @@ def main() -> None:
     items = [x for i, x in enumerate(items) if i % a.num_shards == a.shard_index]
     print(f"shard={a.shard_index}/{a.num_shards} items={len(items)}", flush=True)
     planner = PerspectiveEditPlanner.from_pretrained(a.vl_model, device_map="auto", dtype="bfloat16", local_files_only=True, max_new_tokens=512, enable_thinking=False)
-    edit = QwenImageEditClient.from_config({"model_path": str(a.edit_model), "device": "cuda", "device_map": "", "dtype": "bfloat16", "local_files_only": True, "max_input_side": 1024, "generation_image_size": "request", "output_image_size": "auto", "preserve_input_size": True, "num_inference_steps": a.steps, "true_cfg_scale": a.cfg, "negative_prompt": " ", "enable_model_cpu_offload": True, "enable_attention_slicing": True, "enable_vae_tiling": True, "request_timeout": 1200})
+    edit = QwenImageEditClient.from_config({"model_path": str(a.edit_model), "device": "cuda", "device_map": None, "dtype": "bfloat16", "local_files_only": True, "max_input_side": 1024, "generation_image_size": "request", "output_image_size": "auto", "preserve_input_size": True, "num_inference_steps": a.steps, "true_cfg_scale": a.cfg, "negative_prompt": " ", "enable_model_cpu_offload": True, "enable_attention_slicing": True, "enable_vae_tiling": True, "request_timeout": 1200})
     log = out / f"results_shard{a.shard_index}.jsonl"
     done = {}
     if a.resume and log.exists():
