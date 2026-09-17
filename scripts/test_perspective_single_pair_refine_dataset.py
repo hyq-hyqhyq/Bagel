@@ -62,6 +62,9 @@ class PerspectiveSinglePairRefineDatasetTest(unittest.TestCase):
             "bad_heatmap": "bad_heatmap.png",
             "good_score": 1.0,
             "bad_score": 0.0,
+            "good_reason": "good reason",
+            "bad_reason": "bad reason",
+            "pair_reason": "pair reason",
         }
         self.tokenizer = RecordingTokenizer()
         self.dataset = object.__new__(
@@ -73,6 +76,7 @@ class PerspectiveSinglePairRefineDatasetTest(unittest.TestCase):
         self.dataset.task_ratio = (2, 1, 1)
         self.dataset.include_reason = False
         self.dataset.disable_heatmap_visual_dropout = False
+        self.dataset.use_pair_reason = False
         self.dataset._read_image = (
             lambda image_path: images[Path(image_path).name].copy()
         )
@@ -213,6 +217,34 @@ If no correction is necessary, preserve the input image unchanged.""",
             self.assertTrue(
                 all(item["enable_cfg"] == 1 for item in conditioning_images)
             )
+
+    def test_pair_bad_can_use_pair_specific_reason(self):
+        self.dataset.task_ratio = (0, 1, 0)
+        self.dataset.include_reason = True
+        self.dataset.use_pair_reason = True
+
+        self.dataset.parse_row(self.row, "unused")
+
+        self.assertEqual(
+            self.tokenizer.prompts,
+            [
+                PAIR_HEATMAP_PROMPT,
+                "<think>good reason</think>",
+                PAIR_HEATMAP_PROMPT,
+                "<think>pair reason</think>",
+            ],
+        )
+
+    def test_pair_bad_keeps_legacy_bad_reason_by_default(self):
+        self.dataset.task_ratio = (0, 1, 0)
+        self.dataset.include_reason = True
+
+        self.dataset.parse_row(self.row, "unused")
+
+        self.assertEqual(
+            self.tokenizer.prompts[-1],
+            "<think>bad reason</think>",
+        )
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
     _DISABLE_HEATMAP_VISUAL_DROPOUT_ENV = (
         "BAGEL_PERSPECTIVE_DISABLE_HEATMAP_VISUAL_DROPOUT"
     )
+    _USE_PAIR_REASON_ENV = "BAGEL_PERSPECTIVE_USE_PAIR_REASON"
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -72,12 +73,25 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
         self.disable_heatmap_visual_dropout = (
             disable_visual_dropout_flag in {"1", "true", "yes"}
         )
+
+        use_pair_reason_flag = os.environ.get(
+            self._USE_PAIR_REASON_ENV, "0"
+        ).strip().lower()
+        if use_pair_reason_flag not in {
+            "0", "1", "false", "true", "no", "yes"
+        }:
+            raise ValueError(
+                f"{self._USE_PAIR_REASON_ENV} must be a boolean, got "
+                f"{use_pair_reason_flag!r}"
+            )
+        self.use_pair_reason = use_pair_reason_flag in {"1", "true", "yes"}
         print(
             f"dataset-{self.dataset_name}: multitask_ratio="
             f"{':'.join(str(value) for value in self.task_ratio)}, "
             f"reason_supervision={self.include_reason}, "
             "disable_heatmap_visual_dropout="
-            f"{self.disable_heatmap_visual_dropout}"
+            f"{self.disable_heatmap_visual_dropout}, "
+            f"use_pair_reason={self.use_pair_reason}"
         )
 
     def parse_row(self, row, data_dir):
@@ -189,7 +203,13 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 enable_cfg=False,
             )
             if self.include_reason:
-                reason = row[f"{quality}_reason"]
+                reason_key = (
+                    "pair_reason"
+                    if self.use_pair_reason
+                    and task_name == "pair_bad_heatmap"
+                    else f"{quality}_reason"
+                )
+                reason = row[reason_key]
                 data = self._add_text(
                     data,
                     f"<think>{reason}</think>",
