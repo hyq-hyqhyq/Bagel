@@ -87,15 +87,17 @@ def main() -> None:
     p.add_argument("--model", default="gpt-5.5")
     a = p.parse_args()
     if a.batch_size != 5: raise SystemExit("This evaluator is intentionally fixed to batches of 5; use --batch-size 5")
-    gt = load_gt(a.archive.resolve()); rows=[]
+    gt = load_gt(a.archive.resolve()); prediction_by_id={}
     for line in a.predictions.read_text(encoding="utf8").splitlines():
         if not line.strip(): continue
         r=json.loads(line)
         if r.get("status") != "ok" or not r.get("explanation"): continue
         key=f"{r.get('group_id')}::{r.get('label')}"
         if key not in gt: continue
-        rows.append({"id": key, "group_id": r.get("group_id"), "label": r.get("label"), "explanation": r["explanation"], **gt[key]})
-    rows_by_id={r["id"]:r for r in rows}; existing={}
+        # Logs are append-only and may contain successful retries. Keep only
+        # the latest successful prediction for each group/label pair.
+        prediction_by_id[key] = {"id": key, "group_id": r.get("group_id"), "label": r.get("label"), "explanation": r["explanation"], **gt[key]}
+    rows=list(prediction_by_id.values()); existing={}
     if a.output.exists():
         for line in a.output.read_text(encoding="utf8").splitlines():
             try:
