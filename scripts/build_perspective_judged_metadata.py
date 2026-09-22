@@ -168,7 +168,7 @@ def row_id(row: dict[str, Any], split: str, index: int) -> str:
 
 def prepared_row(row: dict[str, Any]) -> dict[str, Any]:
     row = dict(row)
-    for key in ALL_REASON_KEYS:
+    for key in REASON_KEYS:
         if isinstance(row.get(key), dict):
             row[key] = format_reason(row[key])
         if not str(row.get(key) or "").strip():
