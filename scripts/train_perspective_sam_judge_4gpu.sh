@@ -5,6 +5,20 @@ cd /data/bagel/repo/Bagel
 source /data/bagel/conda/etc/profile.d/conda.sh
 conda activate bagel
 
+# Make the repository modules and the local sanity patch visible to every
+# torchrun worker.  This avoids ``ModuleNotFoundError: data`` and the
+# intermittent sanity_patch import issue after a fresh shell/login.
+export PYTHONPATH=/data/bagel/repo/Bagel:/tmp/bagel_sanity_patch_runtime:${PYTHONPATH:-}
+mkdir -p /tmp/bagel_sanity_patch_runtime
+if [ ! -f /tmp/bagel_sanity_patch_runtime/sanity_patch/settings.py ]; then
+  if [ -f /data/bagel/repo/Bagel/sanity_patch/settings.py ]; then
+    cp -a /data/bagel/repo/Bagel/sanity_patch /tmp/bagel_sanity_patch_runtime/
+  else
+    git archive HEAD sanity_patch | tar -x -C /tmp/bagel_sanity_patch_runtime
+  fi
+fi
+python -c "from sanity_patch.settings import SANITY_PATCH_PROMPT; from sanity_patch.mask_utils import to_binary_mask; import data; print('sanity_patch/data import OK')"
+
 # ===== Edit only this block for a new run =====
 GPU_LIST=0,1,2,3
 DATA_ROOT=/data/bagel/data/perspective_combined_train1400_sam_postprocessed_20260920
