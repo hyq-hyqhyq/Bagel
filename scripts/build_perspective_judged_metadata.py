@@ -182,6 +182,7 @@ def prepared_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def process_split(source: Path, destination: Path, split: str, keys: list[str], args: argparse.Namespace) -> None:
     rows = [prepared_row(json.loads(line)) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
+    destination.parent.mkdir(parents=True, exist_ok=True)
     done: dict[str, dict[str, Any]] = {}
     progress = destination.with_suffix(".progress.jsonl")
     for cache in (destination, progress):
@@ -217,7 +218,6 @@ def process_split(source: Path, destination: Path, split: str, keys: list[str], 
         if errors:
             raise RuntimeError(f"{len(errors)} API rows failed; rerun to resume. First: {errors[0]}")
     ordered = [done[row_id(row, split, i)] for i, row in enumerate(rows)]
-    destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_suffix(destination.suffix + ".tmp")
     tmp.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in ordered), encoding="utf-8")
     os.replace(tmp, destination)
