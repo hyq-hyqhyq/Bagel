@@ -246,6 +246,23 @@ If no correction is necessary, preserve the input image unchanged.""",
             "<think>bad reason</think>",
         )
 
+    def test_judgment_targets_are_separate_from_reason_and_global(self):
+        self.dataset.task_ratio = (1, 0, 0)
+        self.dataset.include_reason = True
+        self.dataset.include_judgment = True
+        row = dict(self.row)
+        row["judge"] = {
+            "checks": {"good_reason": [1, 1], "bad_reason": [1, 0]},
+            "global": {"good": 1, "bad": 0},
+        }
+        samples = self.dataset.parse_row(row, "unused")
+        self.assertEqual(
+            [item["loss_type"] for item in samples[0]["sequence_plan"] if item["type"] == "text"],
+            ["reason", "reason", "judgment", "judgment", "global"],
+        )
+        self.assertIn("Check 2 conclusion: incorrect", self.tokenizer.prompts[-2])
+        self.assertIn("Global conclusion: incorrect", self.tokenizer.prompts[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

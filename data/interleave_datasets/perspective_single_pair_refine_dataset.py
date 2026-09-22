@@ -29,6 +29,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
         "BAGEL_PERSPECTIVE_DISABLE_HEATMAP_VISUAL_DROPOUT"
     )
     _USE_PAIR_REASON_ENV = "BAGEL_PERSPECTIVE_USE_PAIR_REASON"
+    _JUDGMENT_ENV = "BAGEL_PERSPECTIVE_JUDGMENT"
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -85,6 +86,10 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 f"{use_pair_reason_flag!r}"
             )
         self.use_pair_reason = use_pair_reason_flag in {"1", "true", "yes"}
+        judgment_flag = os.environ.get(self._JUDGMENT_ENV, "1").strip().lower()
+        if judgment_flag not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError(f"{self._JUDGMENT_ENV} must be a boolean")
+        self.include_judgment = judgment_flag in {"1", "true", "yes"}
         print(
             f"dataset-{self.dataset_name}: multitask_ratio="
             f"{':'.join(str(value) for value in self.task_ratio)}, "
@@ -92,7 +97,25 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
             "disable_heatmap_visual_dropout="
             f"{self.disable_heatmap_visual_dropout}, "
             f"use_pair_reason={self.use_pair_reason}"
+            f", judgment_supervision={self.include_judgment}"
         )
+
+    @staticmethod
+    def _judgment_text(row, reason_key, quality):
+        """Render check and global polarity targets separately."""
+        judge = row.get("judge") or {}
+        checks = (judge.get("checks") or {}).get(reason_key)
+        if not isinstance(checks, list):
+            return None
+        labels = []
+        for index, value in enumerate(checks, start=1):
+            label = "correct" if int(value) == 1 else "incorrect"
+            labels.append(f"<judgment>Check {index} conclusion: {label}.</judgment>")
+        global_value = ((judge.get("global") or {}).get(quality))
+        if global_value is None:
+            global_value = 1 if quality == "good" else 0
+        global_label = "correct" if int(global_value) == 1 else "incorrect"
+        return labels, f"<judgment>Global conclusion: {global_label}.</judgment>"
 
     def parse_row(self, row, data_dir):
         good_image = self._read_image(os.path.join(data_dir, row["good_image"]))
@@ -215,7 +238,24 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                     f"<think>{reason}</think>",
                     need_loss=True,
                     enable_cfg=False,
+                    loss_type="reason",
                 )
+                if getattr(self, "include_judgment", False):
+                    judgment = self._judgment_text(row, reason_key, quality)
+                    if judgment is not None:
+                        checks, global_text = judgment
+                        for check_text in checks:
+                            data = self._add_text(
+                                data, check_text, need_loss=True,
+                                enable_cfg=False, loss_type="judgment",
+                            )
+                        data = self._add_text(
+                            data,
+                            global_text,
+                            need_loss=True,
+                            enable_cfg=False,
+                            loss_type="global",
+                        )
             data = self._add_image(
                 data,
                 target_image,

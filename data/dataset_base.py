@@ -188,6 +188,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             packed_label_ids            = list(),
             ce_loss_indexes             = list(),
             ce_loss_weights             = list(),
+            ce_loss_kinds               = list(),
             vae_image_tensors           = list(), 
             packed_latent_position_ids  = list(),
             vae_latent_shapes           = list(), 
@@ -286,6 +287,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             data['packed_label_ids'] = torch.tensor(sequence_status['packed_label_ids'])
             data['ce_loss_indexes'] = torch.tensor(sequence_status['ce_loss_indexes'])
             data['ce_loss_weights'] = torch.tensor(sequence_status['ce_loss_weights'])
+            data['ce_loss_kinds'] = torch.tensor(sequence_status['ce_loss_kinds'], dtype=torch.long)
 
         if len(sequence_status['score_labels']) > 0:
             data['score_token_indexes'] = torch.tensor(
@@ -460,8 +462,15 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 sequence_status['packed_text_indexes'].extend(range(curr, curr + len(shifted_text_ids)))
                 if item['loss'] == 1:
                     sequence_status['ce_loss_indexes'].extend(range(curr, curr + len(shifted_text_ids)))
+                    kind = {"reason": 0, "judgment": 1, "global": 2, "other": 0}.get(
+                        item.get("loss_type", "reason"), 0
+                    )
                     sequence_status['ce_loss_weights'].extend(
-                        [len2weight(len(shifted_text_ids))] * len(shifted_text_ids)
+                        [1.0 / len(shifted_text_ids) if kind else len2weight(len(shifted_text_ids))]
+                        * len(shifted_text_ids)
+                    )
+                    sequence_status['ce_loss_kinds'].extend(
+                        [kind] * len(shifted_text_ids)
                     )
                     sequence_status['packed_label_ids'].extend(text_ids + [self.eos_token_id])
                 curr += len(shifted_text_ids)
@@ -474,6 +483,11 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 if item['special_token_loss'] == 1: # <|im_end|> may have loss
                     sequence_status['ce_loss_indexes'].append(curr)
                     sequence_status['ce_loss_weights'].append(1.0)
+                    sequence_status['ce_loss_kinds'].append(
+                        {"reason": 0, "judgment": 1, "global": 2, "other": 0}.get(
+                            item.get("loss_type", "reason"), 0
+                        )
+                    )
                     sequence_status['packed_label_ids'].append(item['special_token_label'])
                 curr += 1
                 curr_split_len += 1
@@ -678,6 +692,7 @@ class SimpleCustomBatch:
             self.packed_label_ids = data["packed_label_ids"]
             self.ce_loss_indexes = data["ce_loss_indexes"]
             self.ce_loss_weights = data["ce_loss_weights"]
+            self.ce_loss_kinds = data["ce_loss_kinds"]
 
         if "score_labels" in data.keys():
             self.score_token_indexes = data["score_token_indexes"]
@@ -719,6 +734,7 @@ class SimpleCustomBatch:
             self.packed_label_ids = self.packed_label_ids.pin_memory()
             self.ce_loss_indexes = self.ce_loss_indexes.pin_memory()
             self.ce_loss_weights = self.ce_loss_weights.pin_memory()
+            self.ce_loss_kinds = self.ce_loss_kinds.pin_memory()
 
         if hasattr(self, 'score_labels'):
             self.score_token_indexes = self.score_token_indexes.pin_memory()
@@ -762,6 +778,7 @@ class SimpleCustomBatch:
             self.packed_label_ids = self.packed_label_ids.to(device)
             self.ce_loss_indexes = self.ce_loss_indexes.to(device)
             self.ce_loss_weights = self.ce_loss_weights.to(device)
+            self.ce_loss_kinds = self.ce_loss_kinds.to(device)
 
         if hasattr(self, 'score_labels'):
             self.score_token_indexes = self.score_token_indexes.to(device)
@@ -814,6 +831,7 @@ class SimpleCustomBatch:
             data['packed_label_ids'] = self.packed_label_ids
             data['ce_loss_indexes'] = self.ce_loss_indexes
             data['ce_loss_weights'] = self.ce_loss_weights
+            data['ce_loss_kinds'] = self.ce_loss_kinds
 
         if hasattr(self, 'score_labels'):
             data['score_token_indexes'] = self.score_token_indexes

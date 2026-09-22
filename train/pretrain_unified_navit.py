@@ -393,6 +393,12 @@ class TrainingArguments:
         default=1.0,
         metadata={"help": "Scaling factor for the language cross-entropy loss term."}
     )
+    judgment_ce_weight: float = field(
+        default=1.0,
+        metadata={
+            "help": "Lambda for the check/global judgment CE relative to reason CE."
+        },
+    )
     score_weight: float = field(
         default=1.0,
         metadata={"help": "Scaling factor for the score-regression MSE loss term."}
@@ -900,6 +906,7 @@ def main(
         data = data.cuda(device).to_dict()
         data_indexes = data.pop('batch_data_indexes', None)
         ce_loss_weights = data.pop('ce_loss_weights', None)       
+        ce_loss_kinds = data.pop('ce_loss_kinds', None)
         mse_foreground_labels = data.pop('mse_foreground_labels', None)
         tokens_tensor = torch.tensor(float(data['sequence_length']), device=device)
         dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
@@ -930,21 +937,59 @@ def main(
         ce_group_size = torch.tensor(int(loss_dict.pop("has_ce")), device=device)
         dist.all_reduce(ce_group_size, op=dist.ReduceOp.SUM)
         if ce_group_size.item() > 0:
-            total_ce_tokens = torch.tensor(
-                len(data.get('ce_loss_indexes', [])), device=device
-            )
+            total_ce_tokens = torch.tensor(len(data.get('ce_loss_indexes', [])), device=device)
             dist.all_reduce(total_ce_tokens, op=dist.ReduceOp.SUM)
-            if training_args.ce_loss_reweighting and ce_loss_weights is not None:
-                ce = ce * ce_loss_weights
-                total_ce_loss_weights = ce_loss_weights.sum()
-                dist.all_reduce(total_ce_loss_weights, op=dist.ReduceOp.SUM)
-                ce = ce.sum() * ce_group_size.item() / total_ce_loss_weights
+
+            # ``ce_loss_kinds`` is aligned with the per-token CE returned by
+            # the model: 0=reason, 1=check, 2=global. Keep
+            # the legacy single-CE path for metadata produced before judge
+            # annotations were added.
+            if ce_loss_kinds is None or ce_loss_kinds.numel() != ce.numel():
+                if training_args.ce_loss_reweighting and ce_loss_weights is not None:
+                    ce = ce * ce_loss_weights
+                    total_ce_loss_weights = ce_loss_weights.sum()
+                    dist.all_reduce(total_ce_loss_weights, op=dist.ReduceOp.SUM)
+                    ce = ce.sum() * ce_group_size.item() / total_ce_loss_weights
+                else:
+                    ce = ce.sum() * ce_group_size.item() / total_ce_tokens
+                loss_dict["ce"] = ce.detach()
+                loss_dict["reason_ce"] = ce.detach()
+                loss_dict["judgment_ce"] = torch.tensor(0.0, device=device)
+                loss = loss + ce * training_args.ce_weight
             else:
-                ce = ce.sum() * ce_group_size.item() / total_ce_tokens
-            loss_dict["ce"] = ce.detach()
-            loss = loss + ce * training_args.ce_weight
+                kind_losses = {}
+                for kind, name in ((0, "reason"), (1, "check"), (2, "global")):
+                    mask = ce_loss_kinds == kind
+                    local_count = torch.tensor(int(mask.sum()), device=device)
+                    dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+                    if local_count.item() == 0:
+                        kind_losses[name] = ce.new_tensor(0.0)
+                        continue
+                    values = ce[mask]
+                    if (kind > 0 or training_args.ce_loss_reweighting) and ce_loss_weights is not None:
+                        values = values * ce_loss_weights[mask]
+                        denominator = ce_loss_weights[mask].sum()
+                    else:
+                        denominator = values.new_tensor(float(values.numel()))
+                    dist.all_reduce(denominator, op=dist.ReduceOp.SUM)
+                    kind_losses[name] = values.sum() * dist.get_world_size() / denominator
+                reason_ce = kind_losses["reason"]
+                check_ce = kind_losses["check"]
+                global_ce = kind_losses["global"]
+                judgment_ce = (check_ce + global_ce) * 0.5
+                loss_dict["reason_ce"] = reason_ce.detach()
+                loss_dict["check_ce"] = check_ce.detach()
+                loss_dict["global_ce"] = global_ce.detach()
+                loss_dict["judgment_ce"] = judgment_ce.detach()
+                loss_dict["ce"] = (reason_ce + judgment_ce).detach()
+                loss = loss + reason_ce * training_args.ce_weight
+                loss = loss + judgment_ce * training_args.ce_weight * training_args.judgment_ce_weight
         else:
             loss_dict["ce"] = torch.tensor(0.0, device=device)
+            loss_dict["reason_ce"] = torch.tensor(0.0, device=device)
+            loss_dict["check_ce"] = torch.tensor(0.0, device=device)
+            loss_dict["global_ce"] = torch.tensor(0.0, device=device)
+            loss_dict["judgment_ce"] = torch.tensor(0.0, device=device)
             total_ce_tokens = torch.tensor(0, device=device)
 
         if training_args.visual_gen:

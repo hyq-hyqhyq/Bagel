@@ -18,7 +18,9 @@ class InterleavedBaseIterableDataset(DistributedIterableDataset):
         }
         return data
 
-    def _add_text(self, data, text, need_loss, enable_cfg=True):
+    def _add_text(self, data, text, need_loss, enable_cfg=True, loss_type="reason"):
+        if loss_type not in {"reason", "judgment", "global", "other"}:
+            raise ValueError(f"Unsupported text loss_type: {loss_type}")
         text_ids = self.tokenizer.encode(text)
         data['num_tokens'] += len(text_ids)
         data['text_ids_list'].append(text_ids)
@@ -27,6 +29,7 @@ class InterleavedBaseIterableDataset(DistributedIterableDataset):
                 'type': 'text',
                 'enable_cfg': int(enable_cfg),
                 'loss': int(need_loss),
+                'loss_type': loss_type,
                 'special_token_loss': 0,
                 'special_token_label': None,
             }
