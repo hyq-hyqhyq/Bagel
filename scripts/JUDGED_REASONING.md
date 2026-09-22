@@ -1,10 +1,8 @@
 # Judged perspective reasoning
 
-`build_perspective_judged_metadata.py` sends the good/bad check texts in each
-metadata row to `gpt-5.6-terra` in one text-only request. The pair checks
-describe both images, so their target is deterministically BAD (the original
-pair-task image) and they are not independently classified by the API. It
-writes `train.jsonl` and
+`build_perspective_judged_metadata.py` sends all good/bad/pair check texts in
+each metadata row to `gpt-5.6-terra` in one text-only request. It writes
+`train.jsonl` and
 `test.jsonl` under a sibling directory ending in `_judge` (or `--output-dir`),
 and resumes from completed rows. The API labels the polarity of each check,
 not whether the annotation is factually correct:

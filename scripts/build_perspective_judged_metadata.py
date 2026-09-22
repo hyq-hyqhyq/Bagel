@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Create GPT-labelled check conclusions for the perspective metadata.
 
-The API receives text only.  For each group all checks from good_reason and
-bad_reason are sent in one request.  The returned label is
+The API receives text only.  For each group all checks from good_reason,
+bad_reason and pair_reason are sent in one request.  The returned label is
 the *conclusion polarity* of a check (consistent/correct=1,
 inconsistent/incorrect=0); it is deliberately not a judgement of whether
 the annotation itself is factually correct.  The image-level label is
@@ -29,8 +29,8 @@ from openai import OpenAI
 from prepare_perspective_strong_long_reason import format_reason
 
 
-REASON_KEYS = ("good_reason", "bad_reason")
-ALL_REASON_KEYS = (*REASON_KEYS, "pair_reason")
+REASON_KEYS = ("good_reason", "bad_reason", "pair_reason")
+JUDGE_VERSION = "check_polarity_v2"
 PROMPT = """You label the polarity of perspective-analysis checks.
 This is NOT a factual review of whether the check is right, and NOT a review
 of the image. Read only the supplied check text and classify what conclusion
@@ -40,7 +40,7 @@ the check reaches:
 - 0 / incorrect: it says the relationship is inconsistent, mismatched,
   violated, skewed, or otherwise detects a perspective error.
 Return JSON only, with this exact shape:
-{{"checks":{{"good_reason":[1],"bad_reason":[0]}},"global":{{"good":1,"bad":0}}}}
+{{"checks":{{"good_reason":[1],"bad_reason":[0],"pair_reason":[0]}},"global":{{"good":1,"bad":0}}}}
 Each list must have one integer per supplied check, in the same order. Do not
 judge annotation quality. Global labels are deterministic and must be good=1,
 bad=0.
@@ -152,10 +152,8 @@ def judge(row: dict[str, Any], key: str, base_url: str, model: str) -> dict[str,
                 model=model, input=prompt
             )
             result = parse_result(response_text(response), expected)
-            # Pair checks compare both images, so a single polarity is not
-            # defined. The pair task's original is BAD; use its known label.
-            result["checks"]["pair_reason"] = [0] * len(as_checks(row["pair_reason"]))
             result["global"] = global_labels
+            result["version"] = JUDGE_VERSION
             result["model"] = model
             return result
         except Exception as exc:
@@ -191,7 +189,7 @@ def process_split(source: Path, destination: Path, split: str, keys: list[str], 
         for line in cache.read_text(encoding="utf-8").splitlines():
             try:
                 old = json.loads(line)
-                if old.get("judge", {}).get("checks") is not None:
+                if old.get("judge", {}).get("version") == JUDGE_VERSION:
                     done[row_id(old, split, -1)] = old
             except Exception:
                 continue

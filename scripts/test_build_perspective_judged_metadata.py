@@ -31,13 +31,13 @@ class JudgedMetadataTest(unittest.TestCase):
         }
         row = judged.prepared_row(row)
         payload, labels = judged.build_payload(row)
-        self.assertEqual(set(payload), {"good_reason", "bad_reason"})
+        self.assertEqual(set(payload), {"good_reason", "bad_reason", "pair_reason"})
         self.assertEqual(labels, {"good": 1, "bad": 0})
         self.assertEqual(row["bad_score"], 0.2)
         self.assertEqual(len(judged.as_checks(row["bad_reason"])), 1)
         self.assertNotIn("Conclusion:", judged.as_checks(row["bad_reason"])[0])
         response = types.SimpleNamespace(output_text=json.dumps({
-            "checks": {"good_reason": [1], "bad_reason": [0]}
+            "checks": {"good_reason": [1], "bad_reason": [0], "pair_reason": [0]}
         }))
         client = types.SimpleNamespace(responses=types.SimpleNamespace(create=lambda **kwargs: response))
         with patch.object(judged, "OpenAI", return_value=client):
