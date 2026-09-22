@@ -186,10 +186,9 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
                     loss_type="reason",
                 )
                 if self.include_judgment:
-                    if len(input_images) > 1:
-                        reason_key = "pair_reason"
-                    else:
-                        reason_key = "good_reason" if reason == row["good_reason"] else "bad_reason"
+                    reason_key = (
+                        "good_reason" if reason == row["good_reason"] else "bad_reason"
+                    )
                     judgment = self._judgment_text(
                         row, reason_key, "good" if reason_key == "good_reason" else "bad"
                     )
