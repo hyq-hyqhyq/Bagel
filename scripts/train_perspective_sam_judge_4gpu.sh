@@ -50,8 +50,12 @@ DATA_TAG=$(basename "${DATA_ROOT}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-
 VAE_TAG=$([[ "${FREEZE_VAE}" == "True" ]] && echo vaefreeze || echo vaeopen)
 VIT_TAG=$([[ "${FREEZE_VIT}" == "True" ]] && echo vitfreeze || echo vitopen)
 RUN_NAME="perspective-${DATA_TAG}-${RUN_TAG}-${VIT_TAG}-${VAE_TAG}-${GPU_COUNT}gpu-${TOTAL_STEPS}step"
-RUN_NAME=${RUN_NAME:0:120}
-RUN_ID=$(echo "${RUN_NAME}" | tr '_' '-')
+# Keep a generous margin below W&B's 128-character Name limit.  All source
+# components are normalized to ASCII, so character count is byte-safe.
+RUN_NAME=$(printf '%s' "${RUN_NAME}" | cut -c1-80)
+RUN_ID=$(printf '%s' "${RUN_NAME}" | tr '_' '-' | cut -c1-80)
+echo "W&B name (${#RUN_NAME} chars): ${RUN_NAME}"
+echo "W&B run id (${#RUN_ID} chars): ${RUN_ID}"
 RESULTS_DIR=/data/bagel/repo/Bagel/results/${RUN_NAME}
 mkdir -p "${RESULTS_DIR}/checkpoints"
 
