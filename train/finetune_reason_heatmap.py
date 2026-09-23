@@ -3,6 +3,13 @@
 
 from dataclasses import dataclass, field
 
+import sys
+from pathlib import Path
+
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 from data import dataset_base
 from data.reason_heatmap_dataset_info import DATASET_INFO, DATASET_REGISTRY
 from sanity_patch.settings import (

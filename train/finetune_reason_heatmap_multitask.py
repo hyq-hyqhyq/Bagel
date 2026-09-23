@@ -7,7 +7,16 @@ legacy ``vae2llm``/``llm2vae`` generation head.  This entrypoint explicitly
 enables the task-specific repair and heatmap adapters.
 """
 
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+
+# When this file is launched by absolute path, Python otherwise exposes only
+# ``.../Bagel/train`` on sys.path. Add the repository root before importing
+# top-level packages such as ``data`` and ``sanity_patch``.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from data import dataset_base
 from data.reason_heatmap_dataset_info import DATASET_INFO, DATASET_REGISTRY
