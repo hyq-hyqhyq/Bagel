@@ -22,7 +22,7 @@ python -c "from sanity_patch.settings import SANITY_PATCH_PROMPT; from sanity_pa
 # ===== Edit only this block for a new run =====
 GPU_LIST=0,1,2,3
 DATA_ROOT=/data/bagel/data/perspective_combined_train1400_sam_postprocessed_20260920
-METADATA_PATH="${DATA_ROOT}_judge/train.jsonl"
+METADATA_PATH=""
 FREEZE_VAE=False
 FREEZE_VIT=False
 FREEZE_LLM=False
@@ -38,6 +38,44 @@ DATA_SEED=42
 RUN_TAG=judge
 # =============================================
 
+# Optional command-line overrides. Example:
+#   bash scripts/train_perspective_sam_judge_4gpu.sh \
+#     --data-root /data/bagel/data/myset --total-steps 14000 --run-tag ablation
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gpus) GPU_LIST="$2"; shift 2 ;;
+    --data-root) DATA_ROOT="$2"; shift 2 ;;
+    --metadata-path) METADATA_PATH="$2"; METADATA_PATH_EXPLICIT=1; shift 2 ;;
+    --freeze-vae) FREEZE_VAE="$2"; shift 2 ;;
+    --freeze-vit) FREEZE_VIT="$2"; shift 2 ;;
+    --freeze-llm) FREEZE_LLM="$2"; shift 2 ;;
+    --freeze-und) FREEZE_UND="$2"; shift 2 ;;
+    --text-dropout) TEXT_DROPOUT="$2"; shift 2 ;;
+    --vae-dropout) VAE_DROPOUT="$2"; shift 2 ;;
+    --vit-dropout) VIT_DROPOUT="$2"; shift 2 ;;
+    --total-steps) TOTAL_STEPS="$2"; shift 2 ;;
+    --save-every) SAVE_EVERY="$2"; shift 2 ;;
+    --lr) LR="$2"; shift 2 ;;
+    --global-seed) GLOBAL_SEED="$2"; shift 2 ;;
+    --data-seed) DATA_SEED="$2"; shift 2 ;;
+    --run-tag) RUN_TAG="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '/^# Optional command-line overrides/,/^while /p' "$0"
+      echo "Options: --gpus --data-root --metadata-path --freeze-vae --freeze-vit --freeze-llm --freeze-und"
+      echo "         --text-dropout --vae-dropout --vit-dropout --total-steps --save-every --lr"
+      echo "         --global-seed --data-seed --run-tag"
+      exit 0
+      ;;
+    *) echo "Unknown argument: $1 (use --help)" >&2; exit 2 ;;
+  esac
+done
+
+# If the data root is overridden but metadata is not, use its sibling judge
+# directory automatically. Explicit --metadata-path always wins.
+if [[ -z "${METADATA_PATH}" ]]; then
+  METADATA_PATH="${DATA_ROOT}_judge/train.jsonl"
+fi
+
 export CUDA_VISIBLE_DEVICES=${GPU_LIST}
 export OMP_NUM_THREADS=1
 export BAGEL_REASON_HEATMAP_DATA_DIR=${DATA_ROOT}
@@ -46,14 +84,14 @@ export BAGEL_PERSPECTIVE_MULTITASK_REASON=1
 export BAGEL_PERSPECTIVE_JUDGMENT=1
 
 GPU_COUNT=$(awk -F, '{print NF}' <<< "${GPU_LIST}")
-DATA_TAG=$(basename "${DATA_ROOT}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
 VAE_TAG=$([[ "${FREEZE_VAE}" == "True" ]] && echo vaefreeze || echo vaeopen)
 VIT_TAG=$([[ "${FREEZE_VIT}" == "True" ]] && echo vitfreeze || echo vitopen)
-RUN_NAME="perspective-${DATA_TAG}-${RUN_TAG}-${VIT_TAG}-${VAE_TAG}-${GPU_COUNT}gpu-${TOTAL_STEPS}step"
+# Keep the W&B name independent of long dataset paths.
+RUN_NAME="perspective-${RUN_TAG}-${VIT_TAG}-${VAE_TAG}-${GPU_COUNT}gpu-${TOTAL_STEPS}step"
 # Keep a generous margin below W&B's 128-character Name limit.  All source
 # components are normalized to ASCII, so character count is byte-safe.
-RUN_NAME=$(printf '%s' "${RUN_NAME}" | cut -c1-80)
-RUN_ID=$(printf '%s' "${RUN_NAME}" | tr '_' '-' | cut -c1-80)
+RUN_NAME=$(printf '%s' "${RUN_NAME}" | cut -c1-64)
+RUN_ID=$(printf '%s' "${RUN_NAME}" | tr '_' '-' | cut -c1-64)
 echo "W&B name (${#RUN_NAME} chars): ${RUN_NAME}"
 echo "W&B run id (${#RUN_ID} chars): ${RUN_ID}"
 RESULTS_DIR=/data/bagel/repo/Bagel/results/${RUN_NAME}
