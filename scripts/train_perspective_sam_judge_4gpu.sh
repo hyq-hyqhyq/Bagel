@@ -86,12 +86,22 @@ export BAGEL_PERSPECTIVE_JUDGMENT=1
 GPU_COUNT=$(awk -F, '{print NF}' <<< "${GPU_LIST}")
 VAE_TAG=$([[ "${FREEZE_VAE}" == "True" ]] && echo vaefreeze || echo vaeopen)
 VIT_TAG=$([[ "${FREEZE_VIT}" == "True" ]] && echo vitfreeze || echo vitopen)
+# Always make each launch a distinct W&B run, even when all hyperparameters
+# are unchanged.  The timestamp is also part of RESULTS_DIR so checkpoints
+# from separate launches cannot be mixed accidentally.
+RUN_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 # Keep the W&B name independent of long dataset paths.
-RUN_NAME="perspective-${RUN_TAG}-${VIT_TAG}-${VAE_TAG}-${GPU_COUNT}gpu-${TOTAL_STEPS}step"
+RUN_NAME="perspective-${RUN_TAG}-${VIT_TAG}-${VAE_TAG}-${GPU_COUNT}gpu-${TOTAL_STEPS}step-${RUN_TIMESTAMP}"
 # Keep a generous margin below W&B's 128-character Name limit.  All source
 # components are normalized to ASCII, so character count is byte-safe.
+# Keep a conservative limit well below W&B's 128-character limit.
+# The current components fit in this limit while retaining the timestamp.
 RUN_NAME=$(printf '%s' "${RUN_NAME}" | cut -c1-64)
-RUN_ID=$(printf '%s' "${RUN_NAME}" | tr '_' '-' | cut -c1-64)
+# pretrain_unified_navit.py builds the final W&B id as
+#   f"{wandb_name}-run{wandb_runid}"
+# Keep runid short; using the timestamp avoids doubling the full name past
+# W&B's 128-character limit.
+RUN_ID="${RUN_TIMESTAMP}"
 echo "W&B name (${#RUN_NAME} chars): ${RUN_NAME}"
 echo "W&B run id (${#RUN_ID} chars): ${RUN_ID}"
 RESULTS_DIR=/data/bagel/repo/Bagel/results/${RUN_NAME}
