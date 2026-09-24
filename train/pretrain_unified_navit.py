@@ -399,6 +399,36 @@ class TrainingArguments:
             "help": "Lambda for the check/global judgment CE relative to reason CE."
         },
     )
+    check_ce_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for on-policy per-check judgment CE."},
+    )
+    global_ce_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for on-policy global judgment CE."},
+    )
+    judgment_rollout_probability: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Fraction of micro-steps that run one on-policy explanation "
+                "rollout per rank. Zero preserves legacy teacher forcing."
+            )
+        },
+    )
+    judgment_rollout_max_tokens: int = field(
+        default=320,
+        metadata={"help": "Maximum tokens in an on-policy explanation rollout."},
+    )
+    judgment_rollout_max_samples_per_rank: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Maximum rollout samples per rank and packed micro-batch; "
+                "one is the fast default."
+            )
+        },
+    )
     score_weight: float = field(
         default=1.0,
         metadata={"help": "Scaling factor for the score-regression MSE loss term."}
@@ -517,6 +547,26 @@ def main(
         raise ValueError(
             "gen_task_filter requires split_gen_adapter_by_task=True"
         )
+    if not 0.0 <= training_args.judgment_rollout_probability <= 1.0:
+        raise ValueError("judgment_rollout_probability must be in [0, 1]")
+    if training_args.judgment_rollout_max_tokens < 1:
+        raise ValueError("judgment_rollout_max_tokens must be positive")
+    if training_args.judgment_rollout_max_samples_per_rank < 0:
+        raise ValueError(
+            "judgment_rollout_max_samples_per_rank must be non-negative"
+        )
+    if (
+        training_args.judgment_rollout_probability > 0
+        and training_args.judgment_rollout_max_samples_per_rank == 0
+    ):
+        raise ValueError(
+            "positive judgment_rollout_probability requires at least one "
+            "rollout sample per rank"
+        )
+    if training_args.check_ce_weight < 0 or training_args.global_ce_weight < 0:
+        raise ValueError("check/global CE weights must be non-negative")
+    if training_args.judgment_rollout_probability > 0:
+        os.environ["BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT"] = "1"
     if getattr(training_args, "e2e_enabled", False):
         if not (
             training_args.visual_gen
@@ -844,6 +894,9 @@ def main(
             foreground_balanced_heatmap_mse=(
                 training_args.foreground_balanced_heatmap_mse
             ),
+            judgment_rollout_max_samples_per_rank=(
+                training_args.judgment_rollout_max_samples_per_rank
+            ),
             data_status=data_status,
         )
         train_dataset.set_epoch(data_args.data_seed)
@@ -905,6 +958,7 @@ def main(
             break
         data = data.cuda(device).to_dict()
         data_indexes = data.pop('batch_data_indexes', None)
+        judgment_rollouts = data.pop('judgment_rollouts', [])
         ce_loss_weights = data.pop('ce_loss_weights', None)       
         ce_loss_kinds = data.pop('ce_loss_kinds', None)
         mse_foreground_labels = data.pop('mse_foreground_labels', None)
@@ -1139,8 +1193,113 @@ def main(
             loss_dict["score_mse"] = torch.tensor(0, device=device)
             total_score_samples = torch.tensor(0, device=device)
 
-        loss = loss / training_args.gradient_accumulation_steps
-        loss.backward()
+        # Release the large packed multimodal graph before starting an
+        # autoregressive FSDP forward. Gradients from both phases accumulate
+        # into the same optimizer step.
+        packed_scaled_loss = (
+            loss / training_args.gradient_accumulation_steps
+        )
+        packed_scaled_loss.backward()
+        del packed_scaled_loss
+        del loss, ce, mse_per_token, score_mse
+        if training_args.visual_gen:
+            del mse
+
+        # Run at most a small, synchronized number of autoregressive
+        # explanation rollouts per rank.  All local check and global labels
+        # reuse the same generated explanation and are evaluated in one
+        # parallel text forward inside forward_judgment_rollout.
+        rollout_probability = training_args.judgment_rollout_probability
+        rollout_draw = (
+            (
+                (micro_step + 1) * 1103515245
+                + training_args.global_seed * 12345
+            )
+            % 1000003
+        ) / 1000003.0
+        rollout_requested = (
+            rollout_probability > 0
+            and rollout_draw < rollout_probability
+        )
+        local_rollout_count = (
+            min(
+                len(judgment_rollouts),
+                training_args.judgment_rollout_max_samples_per_rank,
+            )
+            if rollout_requested
+            else 0
+        )
+        rollout_count = torch.tensor(
+            local_rollout_count, device=device, dtype=torch.int32
+        )
+        dist.all_reduce(rollout_count, op=dist.ReduceOp.MIN)
+        rollout_count_value = int(rollout_count.item())
+        if rollout_count_value > 0:
+            rollout_outputs = []
+            with torch.amp.autocast(
+                "cuda", enabled=True, dtype=torch.bfloat16
+            ):
+                for rollout_sample in judgment_rollouts[:rollout_count_value]:
+                    rollout_outputs.append(
+                        fsdp_model(
+                            judgment_rollout_inputs=rollout_sample,
+                            e2e_vae_model=vae_model,
+                            judgment_rollout_options={
+                                "tokenizer": tokenizer,
+                                "special_tokens": new_token_ids,
+                                "max_tokens": (
+                                    training_args.judgment_rollout_max_tokens
+                                ),
+                            },
+                        )
+                    )
+            rollout_check_ce = torch.stack(
+                [item["check_ce"] for item in rollout_outputs]
+            ).mean()
+            rollout_global_ce = torch.stack(
+                [item["global_ce"] for item in rollout_outputs]
+            ).mean()
+            rollout_judgment_ce = (
+                rollout_check_ce * training_args.check_ce_weight
+                + rollout_global_ce * training_args.global_ce_weight
+            )
+            rollout_loss = (
+                rollout_judgment_ce
+                * training_args.ce_weight
+                * training_args.judgment_ce_weight
+            )
+            rollout_scaled_loss = (
+                rollout_loss / training_args.gradient_accumulation_steps
+            )
+            rollout_scaled_loss.backward()
+            loss_dict["check_ce"] = rollout_check_ce.detach()
+            loss_dict["global_ce"] = rollout_global_ce.detach()
+            loss_dict["judgment_ce"] = rollout_judgment_ce.detach()
+            loss_dict["ce"] = (
+                loss_dict["reason_ce"] + rollout_judgment_ce.detach()
+            )
+            loss_dict["rollout_generated_tokens"] = torch.stack(
+                [item["generated_tokens"] for item in rollout_outputs]
+            ).mean().detach()
+            loss_dict["rollout_structure_fallback"] = torch.stack(
+                [item["structure_fallback"] for item in rollout_outputs]
+            ).mean().detach()
+            del (
+                rollout_loss,
+                rollout_scaled_loss,
+                rollout_check_ce,
+                rollout_global_ce,
+                rollout_judgment_ce,
+                rollout_outputs,
+            )
+        else:
+            loss_dict["rollout_generated_tokens"] = torch.tensor(
+                0.0, device=device
+            )
+            loss_dict["rollout_structure_fallback"] = torch.tensor(
+                0.0, device=device
+            )
+        loss_dict["rollout_count"] = rollout_count.float().detach()
 
         if (micro_step + 1) % training_args.gradient_accumulation_steps == 0:
             total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)

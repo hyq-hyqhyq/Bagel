@@ -263,6 +263,68 @@ If no correction is necessary, preserve the input image unchanged.""",
         self.assertIn("Check 2 conclusion: incorrect", self.tokenizer.prompts[-2])
         self.assertIn("Global conclusion: incorrect", self.tokenizer.prompts[-1])
 
+    def test_on_policy_judgment_uses_compact_reason_and_rollout_metadata(self):
+        self.dataset.task_ratio = (1, 0, 0)
+        self.dataset.include_reason = True
+        self.dataset.include_judgment = True
+        self.dataset.on_policy_judgment = True
+        reason = """Scene:
+A tiled room.
+
+Structures:
+- floor
+
+Checks:
+Check 1:
+Elements:
+- floor lines
+Expected relationship:
+The lines should converge.
+Inspection:
+The lines are badly skewed.
+
+Check 2:
+Elements:
+- wall edges
+Expected relationship:
+The edges should remain upright.
+Inspection:
+The wall remains correct.
+
+Conclusion:
+The floor is inconsistent."""
+        row = dict(self.row)
+        row["good_reason"] = reason
+        row["bad_reason"] = reason
+        row["judge"] = {
+            "checks": {"good_reason": [1, 1], "bad_reason": [0, 1]},
+            "global": {"good": 1, "bad": 0},
+        }
+
+        samples = self.dataset.parse_row(row, "unused")
+        bad = samples[1]
+        supervised_text = [
+            text
+            for text in self.tokenizer.prompts
+            if text.startswith("<think>")
+        ][1]
+        self.assertNotIn("Inspection:", supervised_text)
+        self.assertNotIn("Conclusion:", supervised_text)
+        self.assertIn("Expected relationship:", supervised_text)
+        self.assertEqual(
+            [
+                item["loss_type"]
+                for item in bad["sequence_plan"]
+                if item["type"] == "text" and item["loss"]
+            ],
+            ["reason"],
+        )
+        rollout = bad["judgment_rollout"]
+        self.assertEqual(rollout["check_labels"], [0, 1])
+        self.assertEqual(rollout["global_label"], 0)
+        self.assertEqual(len(rollout["vae_images"]), 1)
+        self.assertEqual(len(rollout["vit_images"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

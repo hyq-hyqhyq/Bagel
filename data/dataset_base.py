@@ -62,6 +62,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
         split_gen_adapter_by_task=False,
         gen_task_filter="joint",
         foreground_balanced_heatmap_mse=False,
+        judgment_rollout_max_samples_per_rank=1,
         data_status=None,
     ):
         super().__init__()
@@ -79,6 +80,13 @@ class PackedDataset(torch.utils.data.IterableDataset):
         self.gen_task_filter = gen_task_filter
         self.foreground_balanced_heatmap_mse = (
             foreground_balanced_heatmap_mse
+        )
+        if judgment_rollout_max_samples_per_rank < 0:
+            raise ValueError(
+                "judgment_rollout_max_samples_per_rank must be non-negative"
+            )
+        self.judgment_rollout_max_samples_per_rank = (
+            judgment_rollout_max_samples_per_rank
         )
         if self.gen_task_filter not in ("joint", "repair", "heatmap"):
             raise ValueError(
@@ -208,6 +216,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             score_vit_token_indexes     = list(),
             score_vit_sample_ids        = list(),
             gen_task                    = None,
+            judgment_rollouts           = list(),
         )
         return sequence_status
 
@@ -306,6 +315,9 @@ class PackedDataset(torch.utils.data.IterableDataset):
             data['score_vit_sample_ids'] = torch.tensor(
                 sequence_status['score_vit_sample_ids'], dtype=torch.long
             )
+
+        if sequence_status['judgment_rollouts']:
+            data['judgment_rollouts'] = sequence_status['judgment_rollouts']
 
         return data
 
@@ -438,6 +450,14 @@ class PackedDataset(torch.utils.data.IterableDataset):
             ("heatmap", "good"): 2,
             ("heatmap", "bad"): 3,
         }.get((sample_gen_task, gen_quality), -1)
+        if (
+            sample.get('judgment_rollout') is not None
+            and len(sequence_status['judgment_rollouts'])
+            < self.judgment_rollout_max_samples_per_rank
+        ):
+            sequence_status['judgment_rollouts'].append(
+                sample['judgment_rollout']
+            )
 
         split_lens, attn_modes = list(), list()
         curr = sequence_status['curr']
@@ -702,6 +722,8 @@ class SimpleCustomBatch:
             self.score_vit_token_indexes = data["score_vit_token_indexes"]
             self.score_vit_sample_ids = data["score_vit_sample_ids"]
 
+        self.judgment_rollouts = data.get("judgment_rollouts", [])
+
     def pin_memory(self):
         self.packed_text_ids = self.packed_text_ids.pin_memory()
         self.packed_text_indexes = self.packed_text_indexes.pin_memory()
@@ -743,6 +765,14 @@ class SimpleCustomBatch:
             self.score_vae_sample_ids = self.score_vae_sample_ids.pin_memory()
             self.score_vit_token_indexes = self.score_vit_token_indexes.pin_memory()
             self.score_vit_sample_ids = self.score_vit_sample_ids.pin_memory()
+
+        for rollout in self.judgment_rollouts:
+            rollout['vae_images'] = [
+                image.pin_memory() for image in rollout['vae_images']
+            ]
+            rollout['vit_images'] = [
+                image.pin_memory() for image in rollout['vit_images']
+            ]
 
         return self
 
@@ -840,6 +870,9 @@ class SimpleCustomBatch:
             data['score_vae_sample_ids'] = self.score_vae_sample_ids
             data['score_vit_token_indexes'] = self.score_vit_token_indexes
             data['score_vit_sample_ids'] = self.score_vit_sample_ids
+
+        if self.judgment_rollouts:
+            data['judgment_rollouts'] = self.judgment_rollouts
 
         return data
 

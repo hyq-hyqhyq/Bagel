@@ -35,7 +35,14 @@ SAVE_EVERY=2000
 LR=2e-5
 GLOBAL_SEED=4396
 DATA_SEED=42
-RUN_TAG=judge
+# On-policy mode removes Inspection/Conclusion from the reason target and
+# performs one rollout per rank on 25% of micro-steps by default.
+RUN_TAG=judge-rollout
+JUDGMENT_ROLLOUT_PROBABILITY=0.25
+JUDGMENT_ROLLOUT_MAX_TOKENS=320
+JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK=1
+CHECK_CE_WEIGHT=1.0
+GLOBAL_CE_WEIGHT=1.0
 # =============================================
 
 # Optional command-line overrides. Example:
@@ -59,11 +66,18 @@ while [[ $# -gt 0 ]]; do
     --global-seed) GLOBAL_SEED="$2"; shift 2 ;;
     --data-seed) DATA_SEED="$2"; shift 2 ;;
     --run-tag) RUN_TAG="$2"; shift 2 ;;
+    --judgment-rollout-probability) JUDGMENT_ROLLOUT_PROBABILITY="$2"; shift 2 ;;
+    --judgment-rollout-max-tokens) JUDGMENT_ROLLOUT_MAX_TOKENS="$2"; shift 2 ;;
+    --judgment-rollout-max-samples-per-rank) JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK="$2"; shift 2 ;;
+    --check-ce-weight) CHECK_CE_WEIGHT="$2"; shift 2 ;;
+    --global-ce-weight) GLOBAL_CE_WEIGHT="$2"; shift 2 ;;
     -h|--help)
       sed -n '/^# Optional command-line overrides/,/^while /p' "$0"
       echo "Options: --gpus --data-root --metadata-path --freeze-vae --freeze-vit --freeze-llm --freeze-und"
       echo "         --text-dropout --vae-dropout --vit-dropout --total-steps --save-every --lr"
       echo "         --global-seed --data-seed --run-tag"
+      echo "         --judgment-rollout-probability --judgment-rollout-max-tokens"
+      echo "         --judgment-rollout-max-samples-per-rank --check-ce-weight --global-ce-weight"
       exit 0
       ;;
     *) echo "Unknown argument: $1 (use --help)" >&2; exit 2 ;;
@@ -82,6 +96,10 @@ export BAGEL_REASON_HEATMAP_DATA_DIR=${DATA_ROOT}
 export BAGEL_REASON_HEATMAP_METADATA_PATH=${METADATA_PATH}
 export BAGEL_PERSPECTIVE_MULTITASK_REASON=1
 export BAGEL_PERSPECTIVE_JUDGMENT=1
+# pretrain_unified_navit.py enables this only when rollout probability is
+# positive. Do not let a value inherited from an older shell force on-policy
+# formatting while rollout is disabled.
+unset BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT
 
 GPU_COUNT=$(awk -F, '{print NF}' <<< "${GPU_LIST}")
 VAE_TAG=$([[ "${FREEZE_VAE}" == "True" ]] && echo vaefreeze || echo vaeopen)
@@ -108,7 +126,7 @@ RESULTS_DIR=/data/bagel/repo/Bagel/results/${RUN_NAME}
 mkdir -p "${RESULTS_DIR}/checkpoints"
 
 torchrun \
-  --nproc_per_node=4 \
+  --nproc_per_node="${GPU_COUNT}" \
   --master_port=29542 \
   train/finetune_reason_heatmap_multitask.py \
   --dataset_config_file ./data/configs/perspective_single_pair_refine.yaml \
@@ -138,12 +156,17 @@ torchrun \
   --timestep_shift 4.0 \
   --ce_weight 0.25 \
   --judgment_ce_weight 1.0 \
+  --check_ce_weight "${CHECK_CE_WEIGHT}" \
+  --global_ce_weight "${GLOBAL_CE_WEIGHT}" \
+  --judgment_rollout_probability "${JUDGMENT_ROLLOUT_PROBABILITY}" \
+  --judgment_rollout_max_tokens "${JUDGMENT_ROLLOUT_MAX_TOKENS}" \
+  --judgment_rollout_max_samples_per_rank "${JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK}" \
   --mse_weight 10 \
   --repair_mse_weight 1 \
   --heatmap_mse_weight 10 \
   --foreground_balanced_heatmap_mse False \
   --use_flex True \
-  --num_shard 4 \
+  --num_shard "${GPU_COUNT}" \
   --num_replicate 1 \
   --sharding_strategy HYBRID_SHARD \
   --expected_num_tokens 24576 \

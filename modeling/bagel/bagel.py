@@ -274,6 +274,8 @@ class Bagel(PreTrainedModel):
         e2e_inputs: Optional[Dict[str, Any]] = None,
         e2e_vae_model: Optional[nn.Module] = None,
         e2e_options: Optional[Dict[str, Any]] = None,
+        judgment_rollout_inputs: Optional[Dict[str, Any]] = None,
+        judgment_rollout_options: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -308,6 +310,16 @@ class Bagel(PreTrainedModel):
                 e2e_inputs,
                 vae_model=e2e_vae_model,
                 options=e2e_options or {},
+            )
+
+        if judgment_rollout_inputs is not None:
+            from .judgment_rollout import forward_judgment_rollout
+
+            return forward_judgment_rollout(
+                self,
+                judgment_rollout_inputs,
+                vae_model=e2e_vae_model,
+                options=judgment_rollout_options or {},
             )
 
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)

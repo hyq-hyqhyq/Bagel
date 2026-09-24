@@ -3,6 +3,7 @@
 """Isolated perspective single/pair/refine multitask training dataset."""
 
 import os
+import re
 
 from PIL import Image
 
@@ -30,6 +31,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
     )
     _USE_PAIR_REASON_ENV = "BAGEL_PERSPECTIVE_USE_PAIR_REASON"
     _JUDGMENT_ENV = "BAGEL_PERSPECTIVE_JUDGMENT"
+    _ON_POLICY_JUDGMENT_ENV = "BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT"
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -90,6 +92,19 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
         if judgment_flag not in {"0", "1", "false", "true", "no", "yes"}:
             raise ValueError(f"{self._JUDGMENT_ENV} must be a boolean")
         self.include_judgment = judgment_flag in {"1", "true", "yes"}
+        on_policy_flag = os.environ.get(
+            self._ON_POLICY_JUDGMENT_ENV, "0"
+        ).strip().lower()
+        if on_policy_flag not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError(
+                f"{self._ON_POLICY_JUDGMENT_ENV} must be a boolean"
+            )
+        self.on_policy_judgment = on_policy_flag in {"1", "true", "yes"}
+        if self.on_policy_judgment and not self.include_reason:
+            raise ValueError(
+                "On-policy judgment requires "
+                f"{self._REASON_ENV}=1"
+            )
         print(
             f"dataset-{self.dataset_name}: multitask_ratio="
             f"{':'.join(str(value) for value in self.task_ratio)}, "
@@ -98,22 +113,100 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
             f"{self.disable_heatmap_visual_dropout}, "
             f"use_pair_reason={self.use_pair_reason}"
             f", judgment_supervision={self.include_judgment}"
+            f", on_policy_judgment={self.on_policy_judgment}"
         )
 
     @staticmethod
-    def _judgment_text(row, reason_key, quality):
-        """Render check and global polarity targets separately."""
+    def _compact_reason(reason):
+        """Remove answer-bearing inspection and conclusion fields.
+
+        Judge metadata contains both structured dictionaries and the formatted
+        text produced by ``prepare_perspective_strong_long_reason.py``.  Keep
+        the neutral scene/structure/check specification in either case.  A
+        legacy free-form reason with no named fields is kept as-is because it
+        cannot be split safely.
+        """
+        if isinstance(reason, dict):
+            lines = [
+                "Scene:",
+                str(reason.get("scene", "")).strip(),
+                "",
+                "Structures:",
+            ]
+            lines.extend(f"- {item}" for item in reason.get("structures", []))
+            lines.extend(["", "Checks:"])
+            for index, check in enumerate(reason.get("checks", []), start=1):
+                lines.extend([f"Check {index}:", "Elements:"])
+                lines.extend(f"- {item}" for item in check.get("elements", []))
+                lines.extend(
+                    [
+                        "Expected relationship:",
+                        str(check.get("expected_relationship", "")).strip(),
+                        "",
+                    ]
+                )
+            return "\n".join(lines).strip()
+
+        text = str(reason or "").strip()
+        if not text:
+            return text
+        lines = text.splitlines()
+        has_named_fields = any(
+            re.match(r"^\s*(?:Inspection|Conclusion)\s*:\s*$", line, re.I)
+            for line in lines
+        )
+        if not has_named_fields:
+            return text
+
+        kept = []
+        skipping_inspection = False
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r"^Conclusion\s*:\s*$", stripped, re.I):
+                break
+            if re.match(r"^Inspection\s*:\s*$", stripped, re.I):
+                skipping_inspection = True
+                continue
+            if skipping_inspection:
+                if re.match(r"^Check\s+\d+\s*:\s*$", stripped, re.I):
+                    skipping_inspection = False
+                else:
+                    continue
+            kept.append(line)
+
+        # Avoid accumulating large runs of empty lines after removing fields.
+        compact = []
+        for line in kept:
+            if not line.strip() and compact and not compact[-1].strip():
+                continue
+            compact.append(line)
+        result = "\n".join(compact).strip()
+        return result or text
+
+    @staticmethod
+    def _judgment_values(row, reason_key, quality):
         judge = row.get("judge") or {}
         checks = (judge.get("checks") or {}).get(reason_key)
         if not isinstance(checks, list):
             return None
+        global_value = (judge.get("global") or {}).get(quality)
+        if global_value is None:
+            global_value = 1 if quality == "good" else 0
+        return [int(value) for value in checks], int(global_value)
+
+    @staticmethod
+    def _judgment_text(row, reason_key, quality):
+        """Render check and global polarity targets separately."""
+        values = PerspectiveSinglePairRefineIterableDataset._judgment_values(
+            row, reason_key, quality
+        )
+        if values is None:
+            return None
+        checks, global_value = values
         labels = []
         for index, value in enumerate(checks, start=1):
             label = "correct" if int(value) == 1 else "incorrect"
             labels.append(f"<judgment>Check {index} conclusion: {label}.</judgment>")
-        global_value = ((judge.get("global") or {}).get(quality))
-        if global_value is None:
-            global_value = 1 if quality == "good" else 0
         global_label = "correct" if int(global_value) == 1 else "incorrect"
         return labels, f"<judgment>Global conclusion: {global_label}.</judgment>"
 
@@ -233,6 +326,9 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                     else f"{quality}_reason"
                 )
                 reason = row[reason_key]
+                on_policy = getattr(self, "on_policy_judgment", False)
+                if on_policy:
+                    reason = self._compact_reason(reason)
                 data = self._add_text(
                     data,
                     f"<think>{reason}</think>",
@@ -241,21 +337,44 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                     loss_type="reason",
                 )
                 if getattr(self, "include_judgment", False):
-                    judgment = self._judgment_text(row, reason_key, quality)
-                    if judgment is not None:
-                        checks, global_text = judgment
-                        for check_text in checks:
-                            data = self._add_text(
-                                data, check_text, need_loss=True,
-                                enable_cfg=False, loss_type="judgment",
-                            )
-                        data = self._add_text(
-                            data,
-                            global_text,
-                            need_loss=True,
-                            enable_cfg=False,
-                            loss_type="global",
+                    if on_policy:
+                        judgment = self._judgment_values(
+                            row, reason_key, quality
                         )
+                        if judgment is not None:
+                            checks, global_value = judgment
+                            # image_tensor_list currently contains one VAE/VIT
+                            # pair per conditioning image; target image tensors
+                            # are appended below.
+                            input_tensors = data["image_tensor_list"]
+                            data["judgment_rollout"] = {
+                                "vae_images": list(input_tensors[0::2]),
+                                "vit_images": list(input_tensors[1::2]),
+                                "prompt_ids": self.tokenizer.encode(prompt),
+                                "check_labels": checks,
+                                "global_label": global_value,
+                                "gen_task": gen_task,
+                                "task_name": task_name,
+                            }
+                    else:
+                        judgment = self._judgment_text(
+                            row, reason_key, quality
+                        )
+                        if judgment is not None:
+                            checks, global_text = judgment
+                            for check_text in checks:
+                                data = self._add_text(
+                                    data, check_text, need_loss=True,
+                                    enable_cfg=False,
+                                    loss_type="judgment",
+                                )
+                            data = self._add_text(
+                                data,
+                                global_text,
+                                need_loss=True,
+                                enable_cfg=False,
+                                loss_type="global",
+                            )
             data = self._add_image(
                 data,
                 target_image,
