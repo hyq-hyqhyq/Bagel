@@ -134,7 +134,26 @@ def parse_reason(value: Any) -> dict[str, Any]:
         validate_reason(result)
         return result
 
-    text = str(value or "").strip()
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Older judge metadata contains harmless presentation wrappers around the
+    # same schema.  Normalize them before parsing so a model-generated
+    # ``<think>`` block or Markdown heading does not make the row unusable.
+    text = re.sub(r"</?think>", "", text, flags=re.I)
+    text = re.sub(
+        r"(?im)^\s*#{1,6}\s*(Scene|Structures|Checks|Conclusion)\s*:",
+        r"\1:",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\*{1,3}\s*(Scene|Structures|Checks|Conclusion)\s*:\s*\*{1,3}",
+        r"\1:",
+        text,
+    )
+    text = re.sub(
+        r"(?im)^\s*\*{1,3}\s*(Scene|Structures|Checks|Conclusion)\s*:\s*\*{1,3}\s*$",
+        r"\1:",
+        text,
+    )
     scene = _section(
         r"^\s*Scene\s*:\s*(.*?)^\s*Structures\s*:", text, "Scene"
     )
