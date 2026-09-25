@@ -364,7 +364,10 @@ def row_id(row: dict[str, Any], split: str, index: int) -> str:
 
 def is_complete(row: dict[str, Any], model: str) -> bool:
     supervision = row.get("tokenwise_reason") or {}
-    if supervision.get("version") != DATA_VERSION or supervision.get("model") != model:
+    # A completed row is reusable across model upgrades.  The model argument
+    # controls only new/retried API calls; otherwise rerunning with gpt-6-sol
+    # would unnecessarily regenerate every successful gpt-5.6-terra row.
+    if supervision.get("version") != DATA_VERSION:
         return False
     try:
         for reason_key in REASON_KEYS:
