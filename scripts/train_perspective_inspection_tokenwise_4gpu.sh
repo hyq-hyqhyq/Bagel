@@ -12,6 +12,7 @@ exec bash "${SCRIPT_DIR}/train_perspective_sam_judge_4gpu.sh" \
   --gpus 0,1,2,3 \
   --freeze-vae False \
   --freeze-vit False \
+  --disable-visual-gen-loss True \
   --text-dropout 0.0 \
   --vae-dropout 0.0 \
   --vit-dropout 0.0 \

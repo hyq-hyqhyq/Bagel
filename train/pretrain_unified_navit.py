@@ -220,6 +220,15 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Train image generation branch."}
     )
+    disable_visual_gen_loss: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Keep VAE/ViT image conditioning but skip the visual generation "
+                "MSE loss used by heatmap/repair targets."
+            )
+        },
+    )
     visual_und: bool = field(
         default=True,
         metadata={"help": "Train image understanding branch."}
@@ -1032,7 +1041,10 @@ def main(
                 with torch.no_grad():
                     data['padded_latent'] = vae_model.encode(data.pop('padded_images'))
             try:
-                loss_dict = fsdp_model(**data)
+                loss_dict = fsdp_model(
+                    **data,
+                    disable_visual_gen_loss=training_args.disable_visual_gen_loss,
+                )
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     logger.error(f"CUDA OOM at step {curr_step}: {e}")

@@ -263,6 +263,7 @@ class Bagel(PreTrainedModel):
         packed_timesteps: Optional[torch.LongTensor] = None,
         mse_loss_indexes: Optional[torch.BoolTensor] = None,
         mse_task_labels: Optional[torch.LongTensor] = None,
+        disable_visual_gen_loss: bool = False,
         gen_task: Optional[str] = None,
         # for score regression
         score_token_indexes: Optional[torch.LongTensor] = None,
@@ -445,7 +446,7 @@ class Bagel(PreTrainedModel):
 
         mse = None
         has_mse_loss = False
-        if self.config.visual_gen:
+        if self.config.visual_gen and not disable_visual_gen_loss:
             if mse_loss_indexes is None:
                 mse_loss_indexes = packed_text_indexes.new_zeros(size=[0])
                 target = packed_sequence.new_zeros(

@@ -29,6 +29,7 @@ FREEZE_VAE=True
 FREEZE_VIT=False
 FREEZE_LLM=False
 FREEZE_UND=False
+DISABLE_VISUAL_GEN_LOSS=False
 TEXT_DROPOUT=0.0
 VAE_DROPOUT=0.0
 VIT_DROPOUT=0.0
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --freeze-vit) FREEZE_VIT="$2"; shift 2 ;;
     --freeze-llm) FREEZE_LLM="$2"; shift 2 ;;
     --freeze-und) FREEZE_UND="$2"; shift 2 ;;
+    --disable-visual-gen-loss) DISABLE_VISUAL_GEN_LOSS="$2"; shift 2 ;;
     --text-dropout) TEXT_DROPOUT="$2"; shift 2 ;;
     --vae-dropout) VAE_DROPOUT="$2"; shift 2 ;;
     --vit-dropout) VIT_DROPOUT="$2"; shift 2 ;;
@@ -86,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       sed -n '/^# Optional command-line overrides/,/^while /p' "$0"
       echo "Options: --gpus --data-root --metadata-path --freeze-vae --freeze-vit --freeze-llm --freeze-und"
+      echo "         --disable-visual-gen-loss"
       echo "         --text-dropout --vae-dropout --vit-dropout --total-steps --save-every --lr"
       echo "         --global-seed --data-seed --wandb-offline --run-tag"
       echo "         --judgment-rollout-probability --judgment-rollout-max-tokens"
@@ -170,6 +173,7 @@ torchrun \
   --freeze_vit "${FREEZE_VIT}" \
   --freeze_llm "${FREEZE_LLM}" \
   --freeze_und "${FREEZE_UND}" \
+  --disable_visual_gen_loss "${DISABLE_VISUAL_GEN_LOSS}" \
   --text_cond_dropout_prob "${TEXT_DROPOUT}" \
   --vae_cond_dropout_prob "${VAE_DROPOUT}" \
   --vit_cond_dropout_prob "${VIT_DROPOUT}" \
