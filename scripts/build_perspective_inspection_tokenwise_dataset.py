@@ -114,6 +114,58 @@ def _section(pattern: str, text: str, name: str) -> str:
     return match.group(1).strip()
 
 
+def _parse_reason_without_scene(text: str) -> dict[str, Any]:
+    """Recover legacy rows that contain checks but no explicit Scene block."""
+    starts = list(
+        re.finditer(
+            r"^\s*(?:[*#]+\s*)?Check\s+\d+\s*:\s*$",
+            text,
+            flags=re.I | re.M,
+        )
+    )
+    checks: list[dict[str, Any]] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        block = text[start.end():end]
+        elements_match = re.search(
+            r"^\s*Elements\s*:\s*(.*?)(?=^\s*Expected relationship\s*:)",
+            block,
+            flags=re.I | re.M | re.S,
+        )
+        expected_match = re.search(
+            r"^\s*Expected relationship\s*:\s*(.*?)(?=^\s*(?:Inspection|Conclusion)\s*:|\Z)",
+            block,
+            flags=re.I | re.M | re.S,
+        )
+        if not elements_match or not expected_match:
+            continue
+        elements = [
+            line.strip()[2:].strip()
+            for line in elements_match.group(1).splitlines()
+            if line.strip().startswith("- ")
+        ]
+        expected = expected_match.group(1).strip()
+        if elements and expected:
+            checks.append({"elements": elements, "expected_relationship": expected})
+    if not checks:
+        raise ValueError("Cannot parse Scene section")
+    conclusion_match = re.search(
+        r"^\s*Conclusion\s*:\s*(.*)\Z", text, flags=re.I | re.M | re.S
+    )
+    conclusion = (
+        conclusion_match.group(1).strip()
+        if conclusion_match
+        else "The listed structures provide the perspective evidence for this image."
+    )
+    structures = list(dict.fromkeys(item for check in checks for item in check["elements"]))
+    return {
+        "scene": "The image contains the perspective structures listed below.",
+        "structures": structures,
+        "checks": checks,
+        "conclusion": conclusion,
+    }
+
+
 def parse_reason(value: Any) -> dict[str, Any]:
     """Parse the stable Scene/Structures/Checks/Conclusion representation."""
     if isinstance(value, dict):
@@ -154,9 +206,20 @@ def parse_reason(value: Any) -> dict[str, Any]:
         r"\1:",
         text,
     )
-    scene = _section(
-        r"^\s*Scene\s*:\s*(.*?)^\s*Structures\s*:", text, "Scene"
+    text = re.sub(
+        r"(?im)^\s*\*+\s*([^*\n]+?)\s*\*+\s*$",
+        r"\1",
+        text,
     )
+    try:
+        scene = _section(
+            r"^\s*(?:Scene|Scene\s+description)\s*:\s*(.*?)"
+            r"^\s*Structures\s*:",
+            text,
+            "Scene",
+        )
+    except ValueError:
+        return _parse_reason_without_scene(text)
     structures_block = _section(
         r"^\s*Structures\s*:\s*(.*?)^\s*Checks\s*:", text, "Structures"
     )
