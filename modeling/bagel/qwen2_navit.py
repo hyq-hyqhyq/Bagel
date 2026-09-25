@@ -257,6 +257,11 @@ class PackedAttention(Qwen2Attention):
             self.k_norm = nn.Identity()
 
     def forward(self, *args, **kwargs):
+        # Rollout checkpoint recomputation may run while the module is back
+        # in train mode, although the call still has inference-shaped
+        # arguments.
+        if "packed_query_sequence" in kwargs:
+            return self.forward_inference(*args, **kwargs)
         if self.training:
             return self.forward_train(*args, **kwargs)
         else:
@@ -436,6 +441,11 @@ class PackedAttentionMoT(Qwen2Attention):
         }
 
     def forward(self, *args, **kwargs):
+        # Rollout checkpoint recomputation may run while the module is back
+        # in train mode, although the call still has inference-shaped
+        # arguments.
+        if "packed_query_sequence" in kwargs:
+            return self.forward_inference(*args, **kwargs)
         if self.training:
             return self.forward_train(*args, **kwargs)
         else:
@@ -659,6 +669,11 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
+        # See Qwen2DecoderLayer.forward: rollout checkpoint recomputation
+        # must remain on the inference-shaped interface after train mode is
+        # restored by the rollout wrapper.
+        if "packed_query_sequence" in kwargs:
+            return self.forward_inference(*args, **kwargs)
         if self.training:
             return self.forward_train(*args, **kwargs)
         else:
@@ -761,6 +776,11 @@ class Qwen2MoTDecoderLayer(nn.Module):
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
+        # Rollout checkpoint recomputation can run after the outer model is
+        # restored to train mode, while still carrying inference-shaped
+        # keyword arguments.
+        if "packed_query_sequence" in kwargs:
+            return self.forward_inference(*args, **kwargs)
         if self.training:
             return self.forward_train(*args, **kwargs)
         else:
@@ -914,6 +934,11 @@ class Qwen2MoEDecoderLayer(nn.Module):
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, *args, **kwargs):
+        # Rollout checkpoint recomputation can run after the outer model is
+        # restored to train mode, while still carrying inference-shaped
+        # keyword arguments.
+        if "packed_query_sequence" in kwargs:
+            return self.forward_inference(*args, **kwargs)
         if self.training:
             return self.forward_train(*args, **kwargs)
         else:

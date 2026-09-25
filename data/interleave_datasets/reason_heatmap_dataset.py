@@ -23,8 +23,6 @@ PngImagePlugin.MAX_TEXT_CHUNK = MaximumDecompressedSize * MegaByte
 
 class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
 
-    _JUDGMENT_ENV = "BAGEL_PERSPECTIVE_JUDGMENT"
-
     def __init__(
         self,
         dataset_name,
@@ -51,31 +49,10 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
         self.vit_transform = vit_transform
         self.data_status = data_status
         self.heatmap_only = heatmap_only
-        self.include_judgment = os.environ.get(self._JUDGMENT_ENV, "1").strip().lower() in {
-            "1", "true", "yes"
-        }
         self.data_paths = self.get_data_paths(
             jsonl_path_list, data_dir_list, num_used_data
         )
         self.set_epoch()
-
-    @staticmethod
-    def _judgment_text(row, reason_key, quality):
-        judge = row.get("judge") or {}
-        checks = (judge.get("checks") or {}).get(reason_key)
-        if not isinstance(checks, list):
-            return None
-        values = [
-            f"<judgment>Check {i} conclusion: {'correct' if int(value) else 'incorrect'}.</judgment>"
-            for i, value in enumerate(checks, 1)
-        ]
-        global_value = ((judge.get("global") or {}).get(quality))
-        if global_value is None:
-            global_value = 1 if quality == "good" else 0
-        global_text = (
-            f"<judgment>Global conclusion: {'correct' if int(global_value) else 'incorrect'}.</judgment>"
-        )
-        return values, global_text
 
     def get_data_paths(self, jsonl_path_list, data_dir_list, num_used_data):
         data_paths = []
@@ -183,26 +160,7 @@ class ReasonHeatmapIterableDataset(InterleavedBaseIterableDataset):
                     f"<think>{reason}</think>",
                     need_loss=True,
                     enable_cfg=False,
-                    loss_type="reason",
                 )
-                if self.include_judgment:
-                    reason_key = (
-                        "good_reason" if reason == row["good_reason"] else "bad_reason"
-                    )
-                    judgment = self._judgment_text(
-                        row, reason_key, "good" if reason_key == "good_reason" else "bad"
-                    )
-                    if judgment is not None:
-                        checks, global_text = judgment
-                        for check_text in checks:
-                            data = self._add_text(
-                                data, check_text, need_loss=True,
-                                enable_cfg=False, loss_type="judgment",
-                            )
-                        data = self._add_text(
-                            data, global_text, need_loss=True,
-                            enable_cfg=False, loss_type="global",
-                        )
             data = self._add_image(
                 data,
                 target_image,

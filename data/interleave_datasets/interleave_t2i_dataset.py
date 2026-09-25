@@ -36,6 +36,47 @@ class InterleavedBaseIterableDataset(DistributedIterableDataset):
         )
         return data
 
+    def _add_segmented_text(self, data, segments, enable_cfg=False):
+        """Add one continuous text turn with per-target-token supervision.
+
+        ``segments`` contains dictionaries with ``text``, ``loss_kind`` and
+        optional ``polarity``.  Tokenizing the segments here lets the packed
+        dataset attach field/class metadata to the exact next-token labels
+        without creating a separate BOS/EOS-delimited turn for every field.
+        """
+        text_ids = []
+        token_loss_kinds = []
+        token_loss_polarities = []
+        for segment in segments:
+            text = str(segment.get("text", ""))
+            ids = self.tokenizer.encode(text)
+            kind = int(segment.get("loss_kind", 0))
+            polarity = int(segment.get("polarity", -1))
+            if kind not in range(5):
+                raise ValueError(f"Unsupported token loss kind: {kind}")
+            if polarity not in (-1, 0, 1):
+                raise ValueError(f"Unsupported token polarity: {polarity}")
+            text_ids.extend(ids)
+            token_loss_kinds.extend([kind] * len(ids))
+            token_loss_polarities.extend([polarity] * len(ids))
+        if not text_ids:
+            raise ValueError("Segmented text must contain at least one token")
+        data['num_tokens'] += len(text_ids)
+        data['text_ids_list'].append(text_ids)
+        data['sequence_plan'].append(
+            {
+                'type': 'text',
+                'enable_cfg': int(enable_cfg),
+                'loss': 1,
+                'loss_type': 'reason',
+                'token_loss_kinds': token_loss_kinds,
+                'token_loss_polarities': token_loss_polarities,
+                'special_token_loss': 0,
+                'special_token_label': None,
+            }
+        )
+        return data
+
     def _add_image(self, data, image, need_loss, need_vae, need_vit, enable_cfg=True):
         assert need_loss or need_vae or need_vit
 

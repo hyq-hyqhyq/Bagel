@@ -3,9 +3,11 @@
 
 import unittest
 from collections import Counter
+import os
 import sys
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from PIL import Image
@@ -19,10 +21,19 @@ if "pyarrow" not in sys.modules:
     sys.modules["pyarrow"] = pyarrow
     sys.modules["pyarrow.parquet"] = types.ModuleType("pyarrow.parquet")
     sys.modules["pyarrow.fs"] = types.ModuleType("pyarrow.fs")
+if "decord" not in sys.modules:
+    decord = types.ModuleType("decord")
+    decord.VideoReader = object
+    decord.video_reader = types.SimpleNamespace(VideoReader=object)
+    sys.modules["decord"] = decord
 
 from data.interleave_datasets.perspective_single_pair_refine_dataset import (
     PerspectiveSinglePairRefineIterableDataset,
 )
+from data.interleave_datasets.reason_heatmap_dataset import (
+    ReasonHeatmapIterableDataset,
+)
+from data.dataset_base import PackedDataset
 from data.reason_heatmap_prompts import (
     PAIR_HEATMAP_PROMPT,
     REFINE_PROMPT,
@@ -235,7 +246,7 @@ If no correction is necessary, preserve the input image unchanged.""",
             ],
         )
 
-    def test_pair_bad_keeps_legacy_bad_reason_by_default(self):
+    def test_pair_bad_can_keep_legacy_bad_reason_when_explicitly_disabled(self):
         self.dataset.task_ratio = (0, 1, 0)
         self.dataset.include_reason = True
 
@@ -245,6 +256,17 @@ If no correction is necessary, preserve the input image unchanged.""",
             self.tokenizer.prompts[-1],
             "<think>bad reason</think>",
         )
+
+    def test_pair_reason_is_enabled_by_default(self):
+        def fake_parent_init(instance, *args, **kwargs):
+            instance.dataset_name = "test"
+
+        with patch.object(
+            ReasonHeatmapIterableDataset, "__init__", fake_parent_init
+        ), patch.dict(os.environ, {}, clear=True):
+            dataset = PerspectiveSinglePairRefineIterableDataset()
+
+        self.assertTrue(dataset.use_pair_reason)
 
     def test_judgment_targets_are_separate_from_reason_and_global(self):
         self.dataset.task_ratio = (1, 0, 0)
@@ -324,6 +346,188 @@ The floor is inconsistent."""
         self.assertEqual(rollout["global_label"], 0)
         self.assertEqual(len(rollout["vae_images"]), 1)
         self.assertEqual(len(rollout["vit_images"]), 1)
+
+    def test_on_policy_rollouts_identify_all_three_logical_reasons(self):
+        self.dataset.task_ratio = (1, 1, 0)
+        self.dataset.include_reason = True
+        self.dataset.include_judgment = True
+        self.dataset.on_policy_judgment = True
+        self.dataset.use_pair_reason = True
+        row = dict(self.row)
+        row["judge"] = {
+            "checks": {
+                "good_reason": [1, 1],
+                "bad_reason": [0, 1],
+                "pair_reason": [0, 1],
+            },
+            "global": {"good": 1, "bad": 0},
+        }
+
+        samples = self.dataset.parse_row(row, "unused")
+        by_name = {sample["task_name"]: sample for sample in samples}
+
+        self.assertEqual(
+            by_name["single_good_heatmap"]["judgment_rollout"]["reason_key"],
+            "good_reason",
+        )
+        self.assertEqual(
+            by_name["single_bad_heatmap"]["judgment_rollout"]["reason_key"],
+            "bad_reason",
+        )
+        self.assertEqual(
+            by_name["pair_bad_heatmap"]["judgment_rollout"]["reason_key"],
+            "pair_reason",
+        )
+        self.assertEqual(
+            by_name["pair_bad_heatmap"]["judgment_rollout"]["check_labels"],
+            [0, 1],
+        )
+
+    def test_tokenwise_reason_is_one_turn_with_balanced_field_metadata(self):
+        self.dataset.task_ratio = (1, 0, 0)
+        self.dataset.include_reason = True
+        self.dataset.include_judgment = True
+        self.dataset.on_policy_judgment = False
+        self.dataset.tokenwise_judgment = True
+        row = dict(self.row)
+        row["judge"] = {
+            "version": "visual_separate_focus_shared_controls_v3",
+            "checks": {
+                "good_reason": [1, 1],
+                "bad_reason": [0, 1],
+                "pair_reason": [0, 1],
+            },
+            "global": {"good": 1, "bad": 0},
+        }
+
+        def structured(labels, global_label):
+            return {
+                "scene": "A tiled room.",
+                "structures": ["floor", "wall"],
+                "checks": [
+                    {
+                        "elements": ["floor lines"],
+                        "expected_relationship": "They share one convergence.",
+                        "inspection": "The visible floor lines diverge from the boundary.",
+                        "judgment": labels[0],
+                    },
+                    {
+                        "elements": ["wall edges"],
+                        "expected_relationship": "They remain upright.",
+                        "inspection": "The visible wall edges retain one upright direction.",
+                        "judgment": labels[1],
+                    },
+                ],
+                "conclusion": "The floor projection conflicts with the stable wall.",
+                "global_judgment": global_label,
+            }
+
+        row["tokenwise_reason"] = {
+            "version": "visual_inspection_tokenwise_v1",
+            "model": "gpt-test",
+            "good_reason": structured([1, 1], 1),
+            "bad_reason": structured([0, 1], 0),
+            "pair_reason": structured([0, 1], 0),
+        }
+
+        samples = self.dataset.parse_row(row, "unused")
+        bad = samples[1]
+        supervised = [
+            item for item in bad["sequence_plan"]
+            if item["type"] == "text" and item["loss"]
+        ]
+        self.assertEqual(len(supervised), 1)
+        item = supervised[0]
+        self.assertEqual(
+            len(item["token_loss_kinds"]),
+            len(item["token_loss_polarities"]),
+        )
+        self.assertEqual(set(item["token_loss_kinds"]), {0, 1, 2, 3, 4})
+        kind_polarities = list(zip(
+            item["token_loss_kinds"], item["token_loss_polarities"]
+        ))
+        self.assertIn((1, 0), kind_polarities)
+        self.assertIn((1, 1), kind_polarities)
+        self.assertIn((2, 0), kind_polarities)
+        self.assertIn((2, 1), kind_polarities)
+        self.assertIn((3, 0), kind_polarities)
+        self.assertIn((4, 0), kind_polarities)
+        self.assertNotIn("judgment_rollout", bad)
+
+
+class PackedJudgmentRolloutSelectionTest(unittest.TestCase):
+    @staticmethod
+    def candidate(name, reason_key=None):
+        rollout = {"task_name": name}
+        if reason_key is not None:
+            rollout["reason_key"] = reason_key
+        return {"judgment_rollout": rollout}
+
+    def test_reservoir_does_not_permanently_keep_first_good_candidate(self):
+        dataset = object.__new__(PackedDataset)
+        dataset.judgment_rollout_max_samples_per_rank = 1
+        status = {
+            "judgment_rollouts": [],
+            "judgment_rollout_seen": 0,
+        }
+
+        dataset._consider_judgment_rollout(self.candidate("good"), status)
+        with patch("data.dataset_base.random.randrange", return_value=0):
+            dataset._consider_judgment_rollout(self.candidate("bad"), status)
+
+        self.assertEqual(status["judgment_rollout_seen"], 2)
+        self.assertEqual(status["judgment_rollouts"][0]["task_name"], "bad")
+
+    def test_reservoir_never_exceeds_configured_capacity(self):
+        dataset = object.__new__(PackedDataset)
+        dataset.judgment_rollout_max_samples_per_rank = 2
+        status = {
+            "judgment_rollouts": [],
+            "judgment_rollout_seen": 0,
+        }
+
+        with patch("data.dataset_base.random.randrange", return_value=99):
+            for index in range(8):
+                dataset._consider_judgment_rollout(
+                    self.candidate(str(index)), status
+                )
+
+        self.assertEqual(status["judgment_rollout_seen"], 8)
+        self.assertEqual(len(status["judgment_rollouts"]), 2)
+
+    def test_default_three_slots_keep_good_bad_and_pair_once_each(self):
+        dataset = object.__new__(PackedDataset)
+        dataset.judgment_rollout_max_samples_per_rank = 3
+        status = {
+            "judgment_rollouts": [],
+            "judgment_rollout_seen": 0,
+            "judgment_rollout_groups": {},
+        }
+        candidates = [
+            self.candidate("good_refine", "good_reason"),
+            self.candidate("single_good_heatmap", "good_reason"),
+            self.candidate("single_bad_heatmap", "bad_reason"),
+            self.candidate("pair_bad_heatmap", "pair_reason"),
+            self.candidate("bad_refine", "bad_reason"),
+        ]
+
+        with patch("data.dataset_base.random.randrange", return_value=0):
+            for candidate in candidates:
+                dataset._consider_judgment_rollout(candidate, status)
+
+        rollouts = status["judgment_rollouts"]
+        self.assertEqual(
+            [item["reason_key"] for item in rollouts],
+            ["good_reason", "bad_reason", "pair_reason"],
+        )
+        self.assertEqual(
+            [item["task_name"] for item in rollouts],
+            [
+                "single_good_heatmap",
+                "single_bad_heatmap",
+                "pair_bad_heatmap",
+            ],
+        )
 
 
 if __name__ == "__main__":

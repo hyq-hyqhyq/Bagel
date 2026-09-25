@@ -32,6 +32,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
     _USE_PAIR_REASON_ENV = "BAGEL_PERSPECTIVE_USE_PAIR_REASON"
     _JUDGMENT_ENV = "BAGEL_PERSPECTIVE_JUDGMENT"
     _ON_POLICY_JUDGMENT_ENV = "BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT"
+    _TOKENWISE_JUDGMENT_ENV = "BAGEL_PERSPECTIVE_TOKENWISE_JUDGMENT"
 
     def __init__(self, *args, **kwargs):
         if "heatmap_only" in kwargs:
@@ -78,7 +79,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
         )
 
         use_pair_reason_flag = os.environ.get(
-            self._USE_PAIR_REASON_ENV, "0"
+            self._USE_PAIR_REASON_ENV, "1"
         ).strip().lower()
         if use_pair_reason_flag not in {
             "0", "1", "false", "true", "no", "yes"
@@ -105,6 +106,25 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                 "On-policy judgment requires "
                 f"{self._REASON_ENV}=1"
             )
+        tokenwise_flag = os.environ.get(
+            self._TOKENWISE_JUDGMENT_ENV, "0"
+        ).strip().lower()
+        if tokenwise_flag not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError(
+                f"{self._TOKENWISE_JUDGMENT_ENV} must be a boolean"
+            )
+        self.tokenwise_judgment = tokenwise_flag in {"1", "true", "yes"}
+        if self.tokenwise_judgment and self.on_policy_judgment:
+            raise ValueError(
+                "Tokenwise teacher forcing and on-policy judgment are "
+                "mutually exclusive"
+            )
+        if self.tokenwise_judgment and not (
+            self.include_reason and self.include_judgment
+        ):
+            raise ValueError(
+                "Tokenwise judgment requires reason and judgment supervision"
+            )
         print(
             f"dataset-{self.dataset_name}: multitask_ratio="
             f"{':'.join(str(value) for value in self.task_ratio)}, "
@@ -114,6 +134,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
             f"use_pair_reason={self.use_pair_reason}"
             f", judgment_supervision={self.include_judgment}"
             f", on_policy_judgment={self.on_policy_judgment}"
+            f", tokenwise_judgment={self.tokenwise_judgment}"
         )
 
     @staticmethod
@@ -209,6 +230,84 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
             labels.append(f"<judgment>Check {index} conclusion: {label}.</judgment>")
         global_label = "correct" if int(global_value) == 1 else "incorrect"
         return labels, f"<judgment>Global conclusion: {global_label}.</judgment>"
+
+    @staticmethod
+    def _tokenwise_segments(row, reason_key, quality):
+        """Render one reason turn with per-field loss kinds and polarities."""
+        container = row.get("tokenwise_reason") or {}
+        if container.get("version") != "visual_inspection_tokenwise_v1":
+            raise ValueError(
+                "Tokenwise judgment requires visual_inspection_tokenwise_v1 data"
+            )
+        reason = container.get(reason_key)
+        if not isinstance(reason, dict):
+            raise ValueError(f"Missing tokenwise reason: {reason_key}")
+        checks = reason.get("checks")
+        if not isinstance(checks, list) or not checks:
+            raise ValueError(f"{reason_key} has no tokenwise checks")
+
+        expected_values = (
+            ((row.get("judge") or {}).get("checks") or {}).get(reason_key)
+        )
+        values = [int(check.get("judgment")) for check in checks]
+        if values != expected_values:
+            raise ValueError(f"{reason_key} tokenwise/judge labels disagree")
+        global_value = int(reason.get("global_judgment"))
+        expected_global = int(
+            ((row.get("judge") or {}).get("global") or {}).get(
+                quality, 1 if quality == "good" else 0
+            )
+        )
+        if global_value != expected_global:
+            raise ValueError(f"{reason_key} tokenwise/global labels disagree")
+
+        # kind: 0=base, 1=inspection, 2=check judgment,
+        #       3=conclusion, 4=global judgment.
+        segments = []
+
+        def add(text, kind=0, polarity=-1):
+            segments.append({
+                "text": text,
+                "loss_kind": kind,
+                "polarity": polarity,
+            })
+
+        add("<think>Scene:\n" + str(reason.get("scene", "")).strip())
+        add("\n\nStructures:\n")
+        add("\n".join(f"- {item}" for item in reason.get("structures", [])))
+        add("\n\nChecks:")
+        for index, (check, value) in enumerate(zip(checks, values), start=1):
+            if value not in (0, 1):
+                raise ValueError(f"{reason_key} has a non-binary check label")
+            elements = check.get("elements") or []
+            inspection = str(check.get("inspection", "")).strip()
+            expected = str(check.get("expected_relationship", "")).strip()
+            if not elements or not inspection or not expected:
+                raise ValueError(f"{reason_key} check {index} is incomplete")
+            add(f"\n\nCheck {index}:\nElements:\n")
+            add("\n".join(f"- {item}" for item in elements))
+            add("\nExpected relationship:\n" + expected)
+            add("\nInspection:\n")
+            add(inspection, kind=1, polarity=value)
+            add("\nCheck judgment:\n")
+            add(
+                "SATISFIED" if value else "VIOLATED",
+                kind=2,
+                polarity=value,
+            )
+        conclusion = str(reason.get("conclusion", "")).strip()
+        if not conclusion or global_value not in (0, 1):
+            raise ValueError(f"{reason_key} has an incomplete conclusion")
+        add("\n\nConclusion:\n")
+        add(conclusion, kind=3, polarity=global_value)
+        add("\n\nGlobal judgment:\n")
+        add(
+            "CONSISTENT" if global_value else "INCONSISTENT",
+            kind=4,
+            polarity=global_value,
+        )
+        add("</think>")
+        return segments
 
     def parse_row(self, row, data_dir):
         good_image = self._read_image(os.path.join(data_dir, row["good_image"]))
@@ -325,18 +424,26 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                     and task_name == "pair_bad_heatmap"
                     else f"{quality}_reason"
                 )
-                reason = row[reason_key]
                 on_policy = getattr(self, "on_policy_judgment", False)
-                if on_policy:
-                    reason = self._compact_reason(reason)
-                data = self._add_text(
-                    data,
-                    f"<think>{reason}</think>",
-                    need_loss=True,
-                    enable_cfg=False,
-                    loss_type="reason",
-                )
-                if getattr(self, "include_judgment", False):
+                tokenwise = getattr(self, "tokenwise_judgment", False)
+                if tokenwise:
+                    data = self._add_segmented_text(
+                        data,
+                        self._tokenwise_segments(row, reason_key, quality),
+                        enable_cfg=False,
+                    )
+                else:
+                    reason = row[reason_key]
+                    if on_policy:
+                        reason = self._compact_reason(reason)
+                    data = self._add_text(
+                        data,
+                        f"<think>{reason}</think>",
+                        need_loss=True,
+                        enable_cfg=False,
+                        loss_type="reason",
+                    )
+                if getattr(self, "include_judgment", False) and not tokenwise:
                     if on_policy:
                         judgment = self._judgment_values(
                             row, reason_key, quality
@@ -353,6 +460,7 @@ class PerspectiveSinglePairRefineIterableDataset(ReasonHeatmapIterableDataset):
                                 "prompt_ids": self.tokenizer.encode(prompt),
                                 "check_labels": checks,
                                 "global_label": global_value,
+                                "reason_key": reason_key,
                                 "gen_task": gen_task,
                                 "task_name": task_name,
                             }

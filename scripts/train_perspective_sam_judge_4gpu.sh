@@ -21,9 +21,11 @@ python -c "from sanity_patch.settings import SANITY_PATCH_PROMPT; from sanity_pa
 
 # ===== Edit only this block for a new run =====
 GPU_LIST=0,1,2,3
-DATA_ROOT=/data/bagel/data/perspective_combined_train1400_sam_postprocessed_20260920
+DATA_ROOT=/data/bagel/data/perspective_combined_train1400_sam_postprocessed_20260920_judge_new
 METADATA_PATH=""
-FREEZE_VAE=False
+# The VAE is still used as the frozen image tokenizer/decoder; disabling
+# visual_gen entirely would remove the heatmap/refine objectives.
+FREEZE_VAE=True
 FREEZE_VIT=False
 FREEZE_LLM=False
 FREEZE_UND=False
@@ -35,14 +37,19 @@ SAVE_EVERY=2000
 LR=2e-5
 GLOBAL_SEED=4396
 DATA_SEED=42
+WANDB_OFFLINE=False
 # On-policy mode removes Inspection/Conclusion from the reason target and
-# performs one rollout per rank on 25% of micro-steps by default.
+# performs one rollout for each good/bad/pair reason on 25% of micro-steps.
 RUN_TAG=judge-rollout
 JUDGMENT_ROLLOUT_PROBABILITY=0.25
 JUDGMENT_ROLLOUT_MAX_TOKENS=320
-JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK=1
+JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK=3
 CHECK_CE_WEIGHT=1.0
 GLOBAL_CE_WEIGHT=1.0
+TOKENWISE_JUDGMENT=False
+REASON_BASE_CE_WEIGHT=1.0
+INSPECTION_CE_WEIGHT=4.0
+CONCLUSION_CE_WEIGHT=4.0
 # =============================================
 
 # Optional command-line overrides. Example:
@@ -65,29 +72,41 @@ while [[ $# -gt 0 ]]; do
     --lr) LR="$2"; shift 2 ;;
     --global-seed) GLOBAL_SEED="$2"; shift 2 ;;
     --data-seed) DATA_SEED="$2"; shift 2 ;;
+    --wandb-offline) WANDB_OFFLINE="$2"; shift 2 ;;
     --run-tag) RUN_TAG="$2"; shift 2 ;;
     --judgment-rollout-probability) JUDGMENT_ROLLOUT_PROBABILITY="$2"; shift 2 ;;
     --judgment-rollout-max-tokens) JUDGMENT_ROLLOUT_MAX_TOKENS="$2"; shift 2 ;;
     --judgment-rollout-max-samples-per-rank) JUDGMENT_ROLLOUT_MAX_SAMPLES_PER_RANK="$2"; shift 2 ;;
     --check-ce-weight) CHECK_CE_WEIGHT="$2"; shift 2 ;;
     --global-ce-weight) GLOBAL_CE_WEIGHT="$2"; shift 2 ;;
+    --tokenwise-judgment) TOKENWISE_JUDGMENT="$2"; shift 2 ;;
+    --reason-base-ce-weight) REASON_BASE_CE_WEIGHT="$2"; shift 2 ;;
+    --inspection-ce-weight) INSPECTION_CE_WEIGHT="$2"; shift 2 ;;
+    --conclusion-ce-weight) CONCLUSION_CE_WEIGHT="$2"; shift 2 ;;
     -h|--help)
       sed -n '/^# Optional command-line overrides/,/^while /p' "$0"
       echo "Options: --gpus --data-root --metadata-path --freeze-vae --freeze-vit --freeze-llm --freeze-und"
       echo "         --text-dropout --vae-dropout --vit-dropout --total-steps --save-every --lr"
-      echo "         --global-seed --data-seed --run-tag"
+      echo "         --global-seed --data-seed --wandb-offline --run-tag"
       echo "         --judgment-rollout-probability --judgment-rollout-max-tokens"
       echo "         --judgment-rollout-max-samples-per-rank --check-ce-weight --global-ce-weight"
+      echo "         --tokenwise-judgment --reason-base-ce-weight --inspection-ce-weight"
+      echo "         --conclusion-ce-weight"
       exit 0
       ;;
     *) echo "Unknown argument: $1 (use --help)" >&2; exit 2 ;;
   esac
 done
 
-# If the data root is overridden but metadata is not, use its sibling judge
-# directory automatically. Explicit --metadata-path always wins.
+# A materialized judge dataset keeps metadata directly in its data root. Keep
+# the sibling fallback for older image-only roots. Explicit --metadata-path
+# always wins.
 if [[ -z "${METADATA_PATH}" ]]; then
-  METADATA_PATH="${DATA_ROOT}_judge/train.jsonl"
+  if [[ -f "${DATA_ROOT}/train.jsonl" ]]; then
+    METADATA_PATH="${DATA_ROOT}/train.jsonl"
+  else
+    METADATA_PATH="${DATA_ROOT}_judge_new/train.jsonl"
+  fi
 fi
 
 export CUDA_VISIBLE_DEVICES=${GPU_LIST}
@@ -96,6 +115,7 @@ export BAGEL_REASON_HEATMAP_DATA_DIR=${DATA_ROOT}
 export BAGEL_REASON_HEATMAP_METADATA_PATH=${METADATA_PATH}
 export BAGEL_PERSPECTIVE_MULTITASK_REASON=1
 export BAGEL_PERSPECTIVE_JUDGMENT=1
+export BAGEL_PERSPECTIVE_USE_PAIR_REASON=1
 # pretrain_unified_navit.py enables this only when rollout probability is
 # positive. Do not let a value inherited from an older shell force on-policy
 # formatting while rollout is disabled.
@@ -156,7 +176,11 @@ torchrun \
   --timestep_shift 4.0 \
   --ce_weight 0.25 \
   --judgment_ce_weight 1.0 \
+  --tokenwise_judgment "${TOKENWISE_JUDGMENT}" \
+  --reason_base_ce_weight "${REASON_BASE_CE_WEIGHT}" \
+  --inspection_ce_weight "${INSPECTION_CE_WEIGHT}" \
   --check_ce_weight "${CHECK_CE_WEIGHT}" \
+  --conclusion_ce_weight "${CONCLUSION_CE_WEIGHT}" \
   --global_ce_weight "${GLOBAL_CE_WEIGHT}" \
   --judgment_rollout_probability "${JUDGMENT_ROLLOUT_PROBABILITY}" \
   --judgment_rollout_max_tokens "${JUDGMENT_ROLLOUT_MAX_TOKENS}" \
@@ -183,7 +207,7 @@ torchrun \
   --total_steps "${TOTAL_STEPS}" \
   --save_every "${SAVE_EVERY}" \
   --log_every 1 \
-  --wandb_offline False \
+  --wandb_offline "${WANDB_OFFLINE}" \
   --wandb_project bagel \
   --wandb_name "${RUN_NAME}" \
   --wandb_runid "${RUN_ID}" \

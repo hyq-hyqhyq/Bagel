@@ -399,6 +399,27 @@ class TrainingArguments:
             "help": "Lambda for the check/global judgment CE relative to reason CE."
         },
     )
+    tokenwise_judgment: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use one teacher-forced reason turn with tokenwise base, "
+                "inspection, check, conclusion and global CE groups."
+            )
+        },
+    )
+    reason_base_ce_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for neutral reason/scaffold token CE."},
+    )
+    inspection_ce_weight: float = field(
+        default=4.0,
+        metadata={"help": "Weight for class-balanced inspection token CE."},
+    )
+    conclusion_ce_weight: float = field(
+        default=4.0,
+        metadata={"help": "Weight for class-balanced conclusion token CE."},
+    )
     check_ce_weight: float = field(
         default=1.0,
         metadata={"help": "Weight for on-policy per-check judgment CE."},
@@ -411,8 +432,8 @@ class TrainingArguments:
         default=0.0,
         metadata={
             "help": (
-                "Fraction of micro-steps that run one on-policy explanation "
-                "rollout per rank. Zero preserves legacy teacher forcing."
+                "Fraction of micro-steps that run on-policy explanation "
+                "rollouts per rank. Zero preserves legacy teacher forcing."
             )
         },
     )
@@ -421,11 +442,11 @@ class TrainingArguments:
         metadata={"help": "Maximum tokens in an on-policy explanation rollout."},
     )
     judgment_rollout_max_samples_per_rank: int = field(
-        default=1,
+        default=3,
         metadata={
             "help": (
                 "Maximum rollout samples per rank and packed micro-batch; "
-                "one is the fast default."
+                "three covers good, bad, and pair reasons by default."
             )
         },
     )
@@ -563,10 +584,31 @@ def main(
             "positive judgment_rollout_probability requires at least one "
             "rollout sample per rank"
         )
-    if training_args.check_ce_weight < 0 or training_args.global_ce_weight < 0:
-        raise ValueError("check/global CE weights must be non-negative")
-    if training_args.judgment_rollout_probability > 0:
+    tokenwise_weights = (
+        training_args.reason_base_ce_weight,
+        training_args.inspection_ce_weight,
+        training_args.check_ce_weight,
+        training_args.conclusion_ce_weight,
+        training_args.global_ce_weight,
+    )
+    if any(weight < 0 for weight in tokenwise_weights):
+        raise ValueError("All tokenwise CE weights must be non-negative")
+    if (
+        training_args.tokenwise_judgment
+        and training_args.judgment_rollout_probability > 0
+    ):
+        raise ValueError(
+            "tokenwise_judgment cannot be combined with judgment rollout"
+        )
+    if training_args.tokenwise_judgment:
+        os.environ["BAGEL_PERSPECTIVE_TOKENWISE_JUDGMENT"] = "1"
+        os.environ.pop("BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT", None)
+    elif training_args.judgment_rollout_probability > 0:
+        os.environ.pop("BAGEL_PERSPECTIVE_TOKENWISE_JUDGMENT", None)
         os.environ["BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT"] = "1"
+    else:
+        os.environ.pop("BAGEL_PERSPECTIVE_TOKENWISE_JUDGMENT", None)
+        os.environ.pop("BAGEL_PERSPECTIVE_ON_POLICY_JUDGMENT", None)
     if getattr(training_args, "e2e_enabled", False):
         if not (
             training_args.visual_gen
@@ -950,6 +992,7 @@ def main(
     total_norm = torch.tensor(0.0, device=device)
     token_window = 0.0
     seqlen_square_window = 0.0
+    judgment_rollout_cache = {}
     dense_token_factor, attn_factor = qwen2_flop_coefficients(model.language_model.config)
     for micro_step, data in enumerate(train_loader):
         curr_step = train_step + micro_step // training_args.gradient_accumulation_steps
@@ -959,8 +1002,21 @@ def main(
         data = data.cuda(device).to_dict()
         data_indexes = data.pop('batch_data_indexes', None)
         judgment_rollouts = data.pop('judgment_rollouts', [])
+        if training_args.judgment_rollout_max_samples_per_rank >= 3:
+            canonical_rollout_tasks = {
+                "good_reason": "single_good_heatmap",
+                "bad_reason": "single_bad_heatmap",
+                "pair_reason": "pair_bad_heatmap",
+            }
+            for rollout_sample in judgment_rollouts:
+                reason_key = rollout_sample.get("reason_key")
+                if rollout_sample.get("task_name") == canonical_rollout_tasks.get(
+                    reason_key
+                ):
+                    judgment_rollout_cache[reason_key] = rollout_sample
         ce_loss_weights = data.pop('ce_loss_weights', None)       
         ce_loss_kinds = data.pop('ce_loss_kinds', None)
+        ce_loss_polarities = data.pop('ce_loss_polarities', None)
         mse_foreground_labels = data.pop('mse_foreground_labels', None)
         tokens_tensor = torch.tensor(float(data['sequence_length']), device=device)
         dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
@@ -994,11 +1050,84 @@ def main(
             total_ce_tokens = torch.tensor(len(data.get('ce_loss_indexes', [])), device=device)
             dist.all_reduce(total_ce_tokens, op=dist.ReduceOp.SUM)
 
+            # Tokenwise teacher forcing uses one packed forward and balances
+            # both rich text and categorical labels by their associated
+            # positive/negative visual judgment:
+            #   0=base, 1=inspection, 2=check judgment,
+            #   3=conclusion, 4=global judgment.
+            if training_args.tokenwise_judgment:
+                if (
+                    ce_loss_kinds is None
+                    or ce_loss_polarities is None
+                    or ce_loss_kinds.numel() != ce.numel()
+                    or ce_loss_polarities.numel() != ce.numel()
+                ):
+                    raise ValueError(
+                        "Tokenwise CE metadata is missing or misaligned"
+                    )
+
+                def distributed_mean(mask):
+                    local_count = torch.tensor(
+                        int(mask.sum()), device=device, dtype=torch.long
+                    )
+                    dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+                    if local_count.item() == 0:
+                        return None
+                    return (
+                        ce[mask].sum()
+                        * dist.get_world_size()
+                        / local_count
+                    )
+
+                def balanced_kind_mean(kind):
+                    class_losses = []
+                    for polarity in (0, 1):
+                        value = distributed_mean(
+                            (ce_loss_kinds == kind)
+                            & (ce_loss_polarities == polarity)
+                        )
+                        if value is not None:
+                            class_losses.append(value)
+                    if not class_losses:
+                        return ce.new_tensor(0.0)
+                    return sum(class_losses) / len(class_losses)
+
+                base_ce = distributed_mean(ce_loss_kinds == 0)
+                if base_ce is None:
+                    base_ce = ce.new_tensor(0.0)
+                inspection_ce = balanced_kind_mean(1)
+                check_ce = balanced_kind_mean(2)
+                conclusion_ce = balanced_kind_mean(3)
+                global_ce = balanced_kind_mean(4)
+                weighted_text_ce = (
+                    base_ce * training_args.reason_base_ce_weight
+                    + inspection_ce * training_args.inspection_ce_weight
+                    + check_ce * training_args.check_ce_weight
+                    + conclusion_ce * training_args.conclusion_ce_weight
+                    + global_ce * training_args.global_ce_weight
+                )
+                reason_ce = (
+                    base_ce * training_args.reason_base_ce_weight
+                    + inspection_ce * training_args.inspection_ce_weight
+                    + conclusion_ce * training_args.conclusion_ce_weight
+                )
+                judgment_ce = (
+                    check_ce * training_args.check_ce_weight
+                    + global_ce * training_args.global_ce_weight
+                )
+                loss_dict["base_ce"] = base_ce.detach()
+                loss_dict["inspection_ce"] = inspection_ce.detach()
+                loss_dict["check_ce"] = check_ce.detach()
+                loss_dict["conclusion_ce"] = conclusion_ce.detach()
+                loss_dict["global_ce"] = global_ce.detach()
+                loss_dict["reason_ce"] = reason_ce.detach()
+                loss_dict["judgment_ce"] = judgment_ce.detach()
+                loss_dict["ce"] = weighted_text_ce.detach()
+                loss = loss + weighted_text_ce * training_args.ce_weight
             # ``ce_loss_kinds`` is aligned with the per-token CE returned by
-            # the model: 0=reason, 1=check, 2=global. Keep
-            # the legacy single-CE path for metadata produced before judge
-            # annotations were added.
-            if ce_loss_kinds is None or ce_loss_kinds.numel() != ce.numel():
+            # the legacy path: 0=reason, 1=check, 2=global. Keep the original
+            # fallback for metadata produced before judge annotations.
+            elif ce_loss_kinds is None or ce_loss_kinds.numel() != ce.numel():
                 if training_args.ce_loss_reweighting and ce_loss_weights is not None:
                     ce = ce * ce_loss_weights
                     total_ce_loss_weights = ce_loss_weights.sum()
@@ -1210,6 +1339,22 @@ def main(
         # reuse the same generated explanation and are evaluated in one
         # parallel text forward inside forward_judgment_rollout.
         rollout_probability = training_args.judgment_rollout_probability
+        reason_order = {
+            "good_reason": 0,
+            "bad_reason": 1,
+            "pair_reason": 2,
+        }
+        if training_args.judgment_rollout_max_samples_per_rank >= 3:
+            rollout_candidates = [
+                judgment_rollout_cache[key]
+                for key in reason_order
+                if key in judgment_rollout_cache
+            ]
+        else:
+            rollout_candidates = judgment_rollouts
+        rollout_candidates.sort(
+            key=lambda sample: reason_order.get(sample.get("reason_key"), 3)
+        )
         rollout_draw = (
             (
                 (micro_step + 1) * 1103515245
@@ -1223,10 +1368,16 @@ def main(
         )
         local_rollout_count = (
             min(
-                len(judgment_rollouts),
+                len(rollout_candidates),
                 training_args.judgment_rollout_max_samples_per_rank,
             )
-            if rollout_requested
+            if (
+                rollout_requested
+                and (
+                    training_args.judgment_rollout_max_samples_per_rank < 3
+                    or len(rollout_candidates) == 3
+                )
+            )
             else 0
         )
         rollout_count = torch.tensor(
@@ -1234,64 +1385,114 @@ def main(
         )
         dist.all_reduce(rollout_count, op=dist.ReduceOp.MIN)
         rollout_count_value = int(rollout_count.item())
+        rollout_signature_mismatch = torch.tensor(0.0, device=device)
         if rollout_count_value > 0:
-            rollout_outputs = []
-            with torch.amp.autocast(
-                "cuda", enabled=True, dtype=torch.bfloat16
-            ):
-                for rollout_sample in judgment_rollouts[:rollout_count_value]:
-                    rollout_outputs.append(
-                        fsdp_model(
-                            judgment_rollout_inputs=rollout_sample,
-                            e2e_vae_model=vae_model,
-                            judgment_rollout_options={
-                                "tokenizer": tokenizer,
-                                "special_tokens": new_token_ids,
-                                "max_tokens": (
-                                    training_args.judgment_rollout_max_tokens
-                                ),
-                            },
-                        )
+            # Nested FSDP modules must be entered in the same order on every
+            # rank. In particular, repair/heatmap use different adapters and
+            # pair samples execute the image-prefix path twice. Synchronizing
+            # only the number of rollout samples is therefore insufficient.
+            local_signatures = torch.tensor(
+                [
+                    [
+                        1 if sample.get("gen_task") == "repair" else 2,
+                        len(sample.get("vae_images") or []),
+                    ]
+                    for sample in rollout_candidates[:rollout_count_value]
+                ],
+                device=device,
+                dtype=torch.int32,
+            )
+            signature_min = local_signatures.clone()
+            signature_max = local_signatures.clone()
+            dist.all_reduce(signature_min, op=dist.ReduceOp.MIN)
+            dist.all_reduce(signature_max, op=dist.ReduceOp.MAX)
+            if not torch.equal(signature_min, signature_max):
+                # Skip this micro-step collectively. A later requested step
+                # will draw another bounded reservoir sample.
+                rollout_count.zero_()
+                rollout_count_value = 0
+                rollout_signature_mismatch.fill_(1.0)
+        if rollout_count_value > 0:
+            # Backward each logical reason immediately.  Keeping all three
+            # rollout graphs alive until torch.stack(...).backward() causes a
+            # large peak on 80GB cards because every graph traverses the full
+            # 21B decoder.  Dividing each loss by the bundle size preserves
+            # the exact mean-gradient semantics while releasing each graph
+            # before the next rollout starts.
+            rollout_check_values = []
+            rollout_global_values = []
+            rollout_token_values = []
+            rollout_fallback_values = []
+            rollout_loss_scale = (
+                training_args.ce_weight
+                * training_args.judgment_ce_weight
+                / rollout_count_value
+                / training_args.gradient_accumulation_steps
+            )
+            for rollout_sample in rollout_candidates[:rollout_count_value]:
+                with torch.amp.autocast(
+                    "cuda", enabled=True, dtype=torch.bfloat16
+                ):
+                    rollout_output = fsdp_model(
+                        judgment_rollout_inputs=rollout_sample,
+                        e2e_vae_model=vae_model,
+                        judgment_rollout_options={
+                            "tokenizer": tokenizer,
+                            "special_tokens": new_token_ids,
+                            "max_tokens": (
+                                training_args.judgment_rollout_max_tokens
+                            ),
+                        },
                     )
-            rollout_check_ce = torch.stack(
-                [item["check_ce"] for item in rollout_outputs]
-            ).mean()
-            rollout_global_ce = torch.stack(
-                [item["global_ce"] for item in rollout_outputs]
-            ).mean()
+                    sample_check_ce = rollout_output["check_ce"]
+                    sample_global_ce = rollout_output["global_ce"]
+                    sample_judgment_ce = (
+                        sample_check_ce * training_args.check_ce_weight
+                        + sample_global_ce * training_args.global_ce_weight
+                    )
+                    sample_rollout_loss = (
+                        sample_judgment_ce * rollout_loss_scale
+                    )
+                sample_rollout_loss.backward()
+                rollout_check_values.append(sample_check_ce.detach())
+                rollout_global_values.append(sample_global_ce.detach())
+                rollout_token_values.append(
+                    rollout_output["generated_tokens"].detach()
+                )
+                rollout_fallback_values.append(
+                    rollout_output["structure_fallback"].detach()
+                )
+                del (
+                    rollout_output,
+                    sample_check_ce,
+                    sample_global_ce,
+                    sample_judgment_ce,
+                    sample_rollout_loss,
+                )
+            if training_args.judgment_rollout_max_samples_per_rank >= 3:
+                # Consume the bundle only after all three logical reasons have
+                # contributed gradients. Subsequent steps refill it with new
+                # good/bad/pair samples instead of replaying the same bundle.
+                judgment_rollout_cache.clear()
+            rollout_check_ce = torch.stack(rollout_check_values).mean()
+            rollout_global_ce = torch.stack(rollout_global_values).mean()
             rollout_judgment_ce = (
                 rollout_check_ce * training_args.check_ce_weight
                 + rollout_global_ce * training_args.global_ce_weight
             )
-            rollout_loss = (
-                rollout_judgment_ce
-                * training_args.ce_weight
-                * training_args.judgment_ce_weight
-            )
-            rollout_scaled_loss = (
-                rollout_loss / training_args.gradient_accumulation_steps
-            )
-            rollout_scaled_loss.backward()
-            loss_dict["check_ce"] = rollout_check_ce.detach()
-            loss_dict["global_ce"] = rollout_global_ce.detach()
+            loss_dict["check_ce"] = rollout_check_ce
+            loss_dict["global_ce"] = rollout_global_ce
             loss_dict["judgment_ce"] = rollout_judgment_ce.detach()
             loss_dict["ce"] = (
                 loss_dict["reason_ce"] + rollout_judgment_ce.detach()
             )
             loss_dict["rollout_generated_tokens"] = torch.stack(
-                [item["generated_tokens"] for item in rollout_outputs]
-            ).mean().detach()
+                rollout_token_values
+            ).mean()
             loss_dict["rollout_structure_fallback"] = torch.stack(
-                [item["structure_fallback"] for item in rollout_outputs]
-            ).mean().detach()
-            del (
-                rollout_loss,
-                rollout_scaled_loss,
-                rollout_check_ce,
-                rollout_global_ce,
-                rollout_judgment_ce,
-                rollout_outputs,
-            )
+                rollout_fallback_values
+            ).mean()
+            del rollout_check_ce, rollout_global_ce, rollout_judgment_ce
         else:
             loss_dict["rollout_generated_tokens"] = torch.tensor(
                 0.0, device=device
@@ -1300,6 +1501,9 @@ def main(
                 0.0, device=device
             )
         loss_dict["rollout_count"] = rollout_count.float().detach()
+        loss_dict["rollout_signature_mismatch"] = (
+            rollout_signature_mismatch.detach()
+        )
 
         if (micro_step + 1) % training_args.gradient_accumulation_steps == 0:
             total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)

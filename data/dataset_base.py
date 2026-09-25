@@ -62,7 +62,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
         split_gen_adapter_by_task=False,
         gen_task_filter="joint",
         foreground_balanced_heatmap_mse=False,
-        judgment_rollout_max_samples_per_rank=1,
+        judgment_rollout_max_samples_per_rank=3,
         data_status=None,
     ):
         super().__init__()
@@ -197,6 +197,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             ce_loss_indexes             = list(),
             ce_loss_weights             = list(),
             ce_loss_kinds               = list(),
+            ce_loss_polarities          = list(),
             vae_image_tensors           = list(), 
             packed_latent_position_ids  = list(),
             vae_latent_shapes           = list(), 
@@ -217,8 +218,65 @@ class PackedDataset(torch.utils.data.IterableDataset):
             score_vit_sample_ids        = list(),
             gen_task                    = None,
             judgment_rollouts           = list(),
+            judgment_rollout_seen       = 0,
+            judgment_rollout_groups     = dict(),
         )
         return sequence_status
+
+    def _consider_judgment_rollout(self, sample, sequence_status):
+        """Keep a uniform, bounded sample of rollout candidates.
+
+        Keeping the first candidate systematically selects GOOD because the
+        perspective dataset emits GOOD before BAD. Reservoir sampling keeps
+        the configured memory bound while giving every packed sample the same
+        chance of supplying the on-policy rollout.
+        """
+        rollout = sample.get('judgment_rollout')
+        capacity = self.judgment_rollout_max_samples_per_rank
+        if rollout is None or capacity == 0:
+            return
+
+        reason_key = rollout.get('reason_key')
+        reason_order = ('good_reason', 'bad_reason', 'pair_reason')
+        if capacity >= len(reason_order) and reason_key in reason_order:
+            # The default three-rollout recipe keeps one representative for
+            # each logical reason, rather than allowing duplicated GOOD tasks
+            # to crowd BAD or pair supervision out of the reservoir. Prefer
+            # the canonical heatmap context so every rank executes the same
+            # adapter and 1/1/2-image prefix pattern.
+            canonical_task = {
+                'good_reason': 'single_good_heatmap',
+                'bad_reason': 'single_bad_heatmap',
+                'pair_reason': 'pair_bad_heatmap',
+            }[reason_key]
+            priority = int(rollout.get('task_name') == canonical_task)
+            groups = sequence_status['judgment_rollout_groups']
+            group = groups.get(reason_key)
+            if group is None or priority > group['priority']:
+                groups[reason_key] = {
+                    'priority': priority,
+                    'seen': 1,
+                    'rollout': rollout,
+                }
+            elif priority == group['priority']:
+                group['seen'] += 1
+                if random.randrange(group['seen']) == 0:
+                    group['rollout'] = rollout
+            sequence_status['judgment_rollouts'] = [
+                groups[key]['rollout'] for key in reason_order if key in groups
+            ]
+            return
+
+        sequence_status['judgment_rollout_seen'] += 1
+        seen = sequence_status['judgment_rollout_seen']
+        reservoir = sequence_status['judgment_rollouts']
+        if len(reservoir) < capacity:
+            reservoir.append(rollout)
+            return
+
+        replacement = random.randrange(seen)
+        if replacement < capacity:
+            reservoir[replacement] = rollout
 
     def _sample_gen_task(self, sample):
         if not self.split_gen_adapter_by_task:
@@ -297,6 +355,9 @@ class PackedDataset(torch.utils.data.IterableDataset):
             data['ce_loss_indexes'] = torch.tensor(sequence_status['ce_loss_indexes'])
             data['ce_loss_weights'] = torch.tensor(sequence_status['ce_loss_weights'])
             data['ce_loss_kinds'] = torch.tensor(sequence_status['ce_loss_kinds'], dtype=torch.long)
+            data['ce_loss_polarities'] = torch.tensor(
+                sequence_status['ce_loss_polarities'], dtype=torch.long
+            )
 
         if len(sequence_status['score_labels']) > 0:
             data['score_token_indexes'] = torch.tensor(
@@ -450,14 +511,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
             ("heatmap", "good"): 2,
             ("heatmap", "bad"): 3,
         }.get((sample_gen_task, gen_quality), -1)
-        if (
-            sample.get('judgment_rollout') is not None
-            and len(sequence_status['judgment_rollouts'])
-            < self.judgment_rollout_max_samples_per_rank
-        ):
-            sequence_status['judgment_rollouts'].append(
-                sample['judgment_rollout']
-            )
+        self._consider_judgment_rollout(sample, sequence_status)
 
         split_lens, attn_modes = list(), list()
         curr = sequence_status['curr']
@@ -482,16 +536,40 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 sequence_status['packed_text_indexes'].extend(range(curr, curr + len(shifted_text_ids)))
                 if item['loss'] == 1:
                     sequence_status['ce_loss_indexes'].extend(range(curr, curr + len(shifted_text_ids)))
-                    kind = {"reason": 0, "judgment": 1, "global": 2, "other": 0}.get(
-                        item.get("loss_type", "reason"), 0
-                    )
-                    sequence_status['ce_loss_weights'].extend(
-                        [1.0 / len(shifted_text_ids) if kind else len2weight(len(shifted_text_ids))]
-                        * len(shifted_text_ids)
-                    )
-                    sequence_status['ce_loss_kinds'].extend(
-                        [kind] * len(shifted_text_ids)
-                    )
+                    token_kinds = item.get('token_loss_kinds')
+                    token_polarities = item.get('token_loss_polarities')
+                    if token_kinds is not None:
+                        if (
+                            len(token_kinds) != len(text_ids)
+                            or token_polarities is None
+                            or len(token_polarities) != len(text_ids)
+                        ):
+                            raise ValueError(
+                                "Segmented text metadata must align with text ids"
+                            )
+                        sequence_status['ce_loss_weights'].extend(
+                            [1.0] * len(shifted_text_ids)
+                        )
+                        sequence_status['ce_loss_kinds'].extend(
+                            list(token_kinds) + [0]
+                        )
+                        sequence_status['ce_loss_polarities'].extend(
+                            list(token_polarities) + [-1]
+                        )
+                    else:
+                        kind = {"reason": 0, "judgment": 1, "global": 2, "other": 0}.get(
+                            item.get("loss_type", "reason"), 0
+                        )
+                        sequence_status['ce_loss_weights'].extend(
+                            [1.0 / len(shifted_text_ids) if kind else len2weight(len(shifted_text_ids))]
+                            * len(shifted_text_ids)
+                        )
+                        sequence_status['ce_loss_kinds'].extend(
+                            [kind] * len(shifted_text_ids)
+                        )
+                        sequence_status['ce_loss_polarities'].extend(
+                            [-1] * len(shifted_text_ids)
+                        )
                     sequence_status['packed_label_ids'].extend(text_ids + [self.eos_token_id])
                 curr += len(shifted_text_ids)
                 curr_split_len += len(shifted_text_ids)
@@ -508,6 +586,7 @@ class PackedDataset(torch.utils.data.IterableDataset):
                             item.get("loss_type", "reason"), 0
                         )
                     )
+                    sequence_status['ce_loss_polarities'].append(-1)
                     sequence_status['packed_label_ids'].append(item['special_token_label'])
                 curr += 1
                 curr_split_len += 1
@@ -553,6 +632,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 if item['special_token_loss'] == 1: # <|endofimage|> may have loss
                     sequence_status['ce_loss_indexes'].append(curr)
                     sequence_status['ce_loss_weights'].append(1.0)
+                    sequence_status['ce_loss_kinds'].append(0)
+                    sequence_status['ce_loss_polarities'].append(-1)
                     sequence_status['packed_label_ids'].append(item['special_token_label'])
                 curr += 1
                 curr_split_len += 1
@@ -623,6 +704,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 if item['special_token_loss'] == 1:
                     sequence_status['ce_loss_indexes'].append(curr)
                     sequence_status['ce_loss_weights'].append(1.0)
+                    sequence_status['ce_loss_kinds'].append(0)
+                    sequence_status['ce_loss_polarities'].append(-1)
                     sequence_status['packed_label_ids'].append(item['special_token_label'])
                 curr += 1
                 curr_split_len += 1
@@ -713,6 +796,7 @@ class SimpleCustomBatch:
             self.ce_loss_indexes = data["ce_loss_indexes"]
             self.ce_loss_weights = data["ce_loss_weights"]
             self.ce_loss_kinds = data["ce_loss_kinds"]
+            self.ce_loss_polarities = data["ce_loss_polarities"]
 
         if "score_labels" in data.keys():
             self.score_token_indexes = data["score_token_indexes"]
@@ -757,6 +841,7 @@ class SimpleCustomBatch:
             self.ce_loss_indexes = self.ce_loss_indexes.pin_memory()
             self.ce_loss_weights = self.ce_loss_weights.pin_memory()
             self.ce_loss_kinds = self.ce_loss_kinds.pin_memory()
+            self.ce_loss_polarities = self.ce_loss_polarities.pin_memory()
 
         if hasattr(self, 'score_labels'):
             self.score_token_indexes = self.score_token_indexes.pin_memory()
@@ -809,6 +894,7 @@ class SimpleCustomBatch:
             self.ce_loss_indexes = self.ce_loss_indexes.to(device)
             self.ce_loss_weights = self.ce_loss_weights.to(device)
             self.ce_loss_kinds = self.ce_loss_kinds.to(device)
+            self.ce_loss_polarities = self.ce_loss_polarities.to(device)
 
         if hasattr(self, 'score_labels'):
             self.score_token_indexes = self.score_token_indexes.to(device)
@@ -862,6 +948,7 @@ class SimpleCustomBatch:
             data['ce_loss_indexes'] = self.ce_loss_indexes
             data['ce_loss_weights'] = self.ce_loss_weights
             data['ce_loss_kinds'] = self.ce_loss_kinds
+            data['ce_loss_polarities'] = self.ce_loss_polarities
 
         if hasattr(self, 'score_labels'):
             data['score_token_indexes'] = self.score_token_indexes
